@@ -2,6 +2,7 @@ services:
   api:
     image: mcr.microsoft.com/dotnet/sdk:10.0
     working_dir: /workspace
+    user: "${ICECOLD_UID:-1000}:${ICECOLD_GID:-1000}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -12,13 +13,18 @@ services:
       ConnectionStrings__Icecold: Host=postgres;Port=5432;Database=icecold;Username=icecold;Password=icecold
       Icecold__PublicBaseUrl: http://localhost:5038
       Icecold__AdminApiKey: dev-admin-key
+      Icecold__PeerWire__Enabled: "true"
+      Icecold__PeerWire__BindAddress: 0.0.0.0
+      Icecold__PeerWire__ListenPort: 6881
     ports:
       - "5038:5038"
+      - "6881:6881"
     volumes:
       - .:/workspace
-      - nuget-packages:/root/.nuget/packages
+      - nuget-packages:/tmp/nuget/packages
     command: >
-      sh -c "dotnet tool restore
+      sh -c "export DOTNET_CLI_HOME=/tmp/dotnet NUGET_PACKAGES=/tmp/nuget/packages
+      && dotnet tool restore
       && dotnet restore src/Icecold.Api/Icecold.Api.csproj
       && dotnet tool run dotnet-ef database update
       --project src/Icecold.Api/Icecold.Api.csproj

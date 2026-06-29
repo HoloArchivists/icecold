@@ -2,7 +2,7 @@ using System.Buffers;
 
 namespace Icecold.Api.Content;
 
-public sealed class LocalFileContentSource : IContentSource
+public sealed class LocalFileContentSource : ISeekableContentSource
 {
     readonly string rootPath;
 
@@ -65,6 +65,13 @@ public sealed class LocalFileContentSource : IContentSource
 
         stream.Seek(offset, SeekOrigin.Begin);
         return Task.FromResult<Stream>(new BoundedReadStream(stream, length));
+    }
+
+    public Task<Stream> OpenSeekableReadAsync(string path, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var fullPath = ResolveExistingFile(path);
+        return Task.FromResult<Stream>(OpenFile(fullPath, FileOptions.Asynchronous | FileOptions.RandomAccess));
     }
 
     string ResolveExistingFile(string path)

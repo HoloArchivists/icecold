@@ -1,10 +1,13 @@
 using Icecold.Api.Options;
+using Icecold.Api.PeerWire;
 using Icecold.Api.Torrents;
 using Microsoft.Extensions.Options;
 
 namespace Icecold.Api.Tracker;
 
-public sealed class InMemoryTrackerPeerStore(IOptions<IcecoldOptions> options) : ITrackerPeerStore
+public sealed class InMemoryTrackerPeerStore(
+    IOptions<IcecoldOptions> options,
+    PeerWireAdvertisedPeerProvider advertisedPeerProvider) : ITrackerPeerStore
 {
     readonly object gate = new();
     readonly Dictionary<string, Dictionary<string, PeerEntry>> torrents = new(StringComparer.Ordinal);
@@ -45,16 +48,21 @@ public sealed class InMemoryTrackerPeerStore(IOptions<IcecoldOptions> options) :
                     now);
             }
 
-            var complete = peers.Values.Count(p => p.Left == 0);
-            var incomplete = peers.Count - complete;
-            var selected = peers
+            var existingComplete = peers.Values.Count(p => p.Left == 0);
+            var existingIncomplete = peers.Count - existingComplete;
+            var hasAdvertisedPeer = advertisedPeerProvider.TryGetPeer(out var advertisedPeer);
+            var complete = existingComplete + (hasAdvertisedPeer ? 1 : 0);
+            var selected = new List<PeerSnapshot>(Math.Min(maxPeers, peers.Count + 1));
+            if (hasAdvertisedPeer && maxPeers > 0)
+                selected.Add(advertisedPeer);
+
+            selected.AddRange(peers
                 .Where(p => p.Key != peerKey)
                 .OrderByDescending(p => p.Value.LastAnnouncedAt)
-                .Take(maxPeers)
-                .Select(p => new PeerSnapshot(p.Value.PeerId, p.Value.IpAddress, p.Value.Port, p.Value.Left))
-                .ToArray();
+                .Take(maxPeers - selected.Count)
+                .Select(p => new PeerSnapshot(p.Value.PeerId, p.Value.IpAddress, p.Value.Port, p.Value.Left)));
 
-            return new TrackerAnnounceResult(selected, complete, incomplete, interval, minInterval);
+            return new TrackerAnnounceResult(selected, complete, existingIncomplete, interval, minInterval);
         }
     }
 

@@ -13,6 +13,11 @@ public interface IContentSource
     Task<Stream> OpenRangeAsync(string path, long offset, long length, CancellationToken cancellationToken);
 }
 
+public interface ISeekableContentSource : IContentSource
+{
+    Task<Stream> OpenSeekableReadAsync(string path, CancellationToken cancellationToken);
+}
+
 public sealed record ContentMetadata(
     string SourceName,
     string Path,

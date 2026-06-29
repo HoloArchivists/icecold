@@ -3,6 +3,7 @@ using Icecold.Api.Content;
 using Icecold.Api.Data;
 using Icecold.Api.Indexing;
 using Icecold.Api.Options;
+using Icecold.Api.PeerWire;
 using Icecold.Api.Torrents;
 using Icecold.Api.Tracker;
 using Icecold.Api.WebSeed;
@@ -19,7 +20,10 @@ builder.Services.AddSwaggerGen(options =>
     options.OperationFilter<AdminApiKeyHeaderOperationFilter>();
 });
 
-builder.Services.Configure<IcecoldOptions>(builder.Configuration.GetSection(IcecoldOptions.SectionName));
+builder.Services.AddOptions<IcecoldOptions>()
+    .Bind(builder.Configuration.GetSection(IcecoldOptions.SectionName))
+    .ValidateOnStart();
+builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, PeerWireOptionsValidator>();
 
 builder.Services.AddDbContext<IcecoldDbContext>(options =>
 {
@@ -34,6 +38,10 @@ builder.Services.AddSingleton<ContentSourceRegistry>();
 builder.Services.AddSingleton<PublicUrlBuilder>();
 builder.Services.AddSingleton<TorrentBuilder>();
 builder.Services.AddSingleton<IIndexingQueue, ChannelIndexingQueue>();
+builder.Services.AddSingleton<PeerWirePeerIdentity>();
+builder.Services.AddSingleton<PeerWireAdvertisedPeerProvider>();
+builder.Services.AddSingleton<PeerWireTorrentResolver>();
+builder.Services.AddSingleton<PeerWireConnectionHandler>();
 builder.Services.AddSingleton<ITrackerPeerStore, InMemoryTrackerPeerStore>();
 builder.Services.AddScoped<AdminApiKeyAuthorizationFilter>();
 builder.Services.AddScoped<IndexFileService>();
@@ -41,6 +49,7 @@ builder.Services.AddScoped<TorrentMetadataService>();
 builder.Services.AddScoped<TrackerAnnounceService>();
 builder.Services.AddScoped<WebSeedService>();
 builder.Services.AddHostedService<IndexingWorker>();
+builder.Services.AddHostedService<PeerWireServer>();
 
 var app = builder.Build();
 

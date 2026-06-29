@@ -1,6 +1,7 @@
 services:
   api:
     image: ghcr.io/holoarchivists/icecold:${ICECOLD_IMAGE_TAG:-latest}
+    user: "${ICECOLD_UID:-1654}:${ICECOLD_GID:-1654}"
     restart: unless-stopped
     depends_on:
       postgres:
@@ -12,11 +13,17 @@ services:
       Icecold__PublicBaseUrl: ${ICECOLD_PUBLIC_BASE_URL:?ICECOLD_PUBLIC_BASE_URL is required}
       Icecold__AdminApiKey: ${ICECOLD_ADMIN_API_KEY:?ICECOLD_ADMIN_API_KEY is required}
       Icecold__Database__AutoMigrate: ${ICECOLD_AUTO_MIGRATE:-true}
+      Icecold__PeerWire__Enabled: ${ICECOLD_PEERWIRE_ENABLED:-true}
+      Icecold__PeerWire__BindAddress: 0.0.0.0
+      Icecold__PeerWire__ListenPort: 6881
+      Icecold__PeerWire__AdvertisedIp: ${ICECOLD_PEERWIRE_ADVERTISED_IP:?ICECOLD_PEERWIRE_ADVERTISED_IP is required}
+      Icecold__PeerWire__AdvertisedPort: ${ICECOLD_PEERWIRE_ADVERTISED_PORT:-6881}
       Icecold__ContentSources__0__Name: ${ICECOLD_CONTENT_SOURCE_NAME:-local}
       Icecold__ContentSources__0__Type: local
       Icecold__ContentSources__0__RootPath: /data/files
     ports:
       - "${ICECOLD_HTTP_PORT:-8080}:8080"
+      - "${ICECOLD_PEERWIRE_PORT:-6881}:6881"
     volumes:
       - ${ICECOLD_CONTENT_ROOT:?ICECOLD_CONTENT_ROOT is required}:/data/files:ro
 

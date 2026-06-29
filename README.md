@@ -17,13 +17,13 @@ BitTorrent peers take over as clients begin sharing with each other.
 - Generates one BitTorrent torrent per indexed file.
 - Serves `.torrent` files and magnet links for ready content.
 - Runs a built-in tracker so clients can discover each other.
-- Provides cold file bytes from the backing store through HTTP WebSeed.
+- Provides cold file bytes from the backing store through HTTP WebSeed and plain TCP peer-wire seeding.
 - Runs as a local ASP.NET Core app or a Docker image.
 
 ## Current Limits
 
 - Only single-file indexing is implemented. Folder indexing currently returns `501 Not Implemented`.
-- Icecold currently serves file bytes only through HTTP WebSeed. Acting as a BitTorrent peer/seeder over peer-wire is planned but not implemented yet.
+- Peer-wire support is upload-only plain TCP, including `ut_metadata` for magnet clients. Icecold does not download from peers, initiate outbound peer connections, support uTP, or support protocol encryption yet.
 - The tracker peer store is in-memory and single-instance.
 - The only implemented content source is the local filesystem.
 - S3 or HTTP-backed storage should fit the existing `IContentSource` boundary, but those sources are not implemented yet.
@@ -49,7 +49,13 @@ ICECOLD_ADMIN_API_KEY=replace-with-a-long-random-admin-key
 ICECOLD_PUBLIC_BASE_URL=https://icecold.example.org
 ICECOLD_CONTENT_ROOT=/srv/archive/files
 ICECOLD_HTTP_PORT=8080
+ICECOLD_PEERWIRE_ADVERTISED_IP=203.0.113.10
+ICECOLD_PEERWIRE_PORT=6881
+ICECOLD_PEERWIRE_ADVERTISED_PORT=6881
 ICECOLD_IMAGE_TAG=latest
+# Optional: run the API container as a host user that can read ICECOLD_CONTENT_ROOT.
+ICECOLD_UID=1000
+ICECOLD_GID=1000
 ```
 
 Start it:
@@ -59,12 +65,18 @@ docker compose -f compose.prod.yaml up -d
 ```
 
 The production compose file intentionally requires `POSTGRES_PASSWORD`,
-`ICECOLD_ADMIN_API_KEY`, `ICECOLD_PUBLIC_BASE_URL`, and `ICECOLD_CONTENT_ROOT`.
+`ICECOLD_ADMIN_API_KEY`, `ICECOLD_PUBLIC_BASE_URL`, `ICECOLD_CONTENT_ROOT`, and
+`ICECOLD_PEERWIRE_ADVERTISED_IP`.
 `ICECOLD_CONTENT_ROOT` is mounted read-only at `/data/files` inside the API container.
+The advertised peer-wire address must be an IP address clients can reach; BitTorrent
+tracker compact peer responses cannot advertise a DNS name.
+Set `ICECOLD_UID` and `ICECOLD_GID` if the API container needs a specific host identity
+to read the mounted content root.
 
 Set `ICECOLD_AUTO_MIGRATE=false` if you want to manage database migrations separately.
 For internet-facing deployments, put Icecold behind a reverse proxy or load balancer that
-terminates TLS and forwards traffic to `ICECOLD_HTTP_PORT`.
+terminates TLS and forwards HTTP traffic to `ICECOLD_HTTP_PORT`. Peer-wire uses plain TCP
+on `ICECOLD_PEERWIRE_PORT` and must be reachable directly by BitTorrent clients.
 
 ## Use The API
 
@@ -99,10 +111,17 @@ pointing to the canonical row.
 
 The default [compose.yaml](compose.yaml) is for local development, not production.
 It uses the .NET SDK image, mounts this repo at `/workspace`, applies EF migrations,
-and runs the API with `dotnet watch`.
+and runs the API with `dotnet watch`. The API container runs as
+`${ICECOLD_UID}:${ICECOLD_GID}` to avoid root-owned build artifacts in the bind-mounted repo.
 
 ```bash
 docker compose up
+```
+
+If your host user is not `1000:1000`, create a local `.env` first:
+
+```bash
+printf 'ICECOLD_UID=%s\nICECOLD_GID=%s\n' "$(id -u)" "$(id -g)" > .env
 ```
 
 The dev API is available at:
@@ -118,6 +137,11 @@ http://localhost:5038/swagger
 ```
 
 The raw OpenAPI documents are available at `/swagger/v1/swagger.json` and `/openapi/v1.json`.
+
+For peer-wire testing through dev Compose, set `Icecold:PeerWire:AdvertisedIp` in
+`src/Icecold.Api/appsettings.Development.json` to an IP address reachable by your torrent
+client. The dev compose file enables the listener but intentionally leaves the advertised
+peer endpoint to app configuration.
 
 To create a sample file under the default dev content source:
 
@@ -161,6 +185,7 @@ Main settings live under `Icecold` in `appsettings.json`:
 - `AdminApiKey`: required value for private `/api/*` endpoints. The development key lives only in `appsettings.Development.json`; non-development deployments must provide a real value through environment, secret, or external configuration.
 - `Indexing:MaxConcurrency`: number of concurrent hashing workers.
 - `Tracker:*`: announce intervals, peer timeout, and max peer response size.
+- `PeerWire:*`: upload-only TCP peer-wire listener and advertised peer endpoint.
 - `ContentSources`: named sources. V1 supports `Type: "local"` with a required, non-blank `RootPath`.
 
 `Database:AutoMigrate` defaults to `false` in app configuration. The production Compose file

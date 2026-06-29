@@ -14,6 +14,8 @@ public sealed class IcecoldOptions
 
     public TrackerOptions Tracker { get; set; } = new();
 
+    public PeerWireOptions PeerWire { get; set; } = new();
+
     public List<ContentSourceOptions> ContentSources { get; set; } = [];
 }
 
@@ -36,6 +38,23 @@ public sealed class TrackerOptions
     public int PeerTimeoutSeconds { get; set; } = 2700;
 
     public int MaxPeersReturned { get; set; } = 200;
+}
+
+public sealed class PeerWireOptions
+{
+    public bool Enabled { get; set; }
+
+    public string BindAddress { get; set; } = "0.0.0.0";
+
+    public int ListenPort { get; set; } = 6881;
+
+    public string AdvertisedIp { get; set; } = "";
+
+    public int AdvertisedPort { get; set; } = 6881;
+
+    public int MaxBlockLength { get; set; } = 16 * 1024;
+
+    public int MaxConnections { get; set; } = 128;
 }
 
 public sealed class ContentSourceOptions

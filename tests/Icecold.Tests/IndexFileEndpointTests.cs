@@ -113,7 +113,8 @@ public sealed class IndexFileEndpointTests : IDisposable
                 {
                     ["Icecold:ContentSources:0:Name"] = "local",
                     ["Icecold:ContentSources:0:Type"] = "local",
-                    ["Icecold:ContentSources:0:RootPath"] = root
+                    ["Icecold:ContentSources:0:RootPath"] = root,
+                    ["Icecold:PeerWire:Enabled"] = "false"
                 });
             });
 
