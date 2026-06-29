@@ -34,6 +34,24 @@ public sealed class TrackerTests
     }
 
     [Fact]
+    public void TryParseScrape_Preserves_Raw_InfoHash_Bytes()
+    {
+        var first = Enumerable.Range(0, 20).Select(i => (byte)i).ToArray();
+        var second = Enumerable.Range(20, 20).Select(i => (byte)i).ToArray();
+        var context = new DefaultHttpContext();
+        context.Request.QueryString = new QueryString(
+            "?info_hash=" + PercentEncode(first)
+            + "&info_hash=" + PercentEncode(second));
+
+        var parsed = TrackerQueryParser.TryParseScrape(context.Request, out var infoHashes, out var failure);
+
+        Assert.True(parsed, failure);
+        Assert.Equal(2, infoHashes.Count);
+        Assert.Equal(first, infoHashes[0]);
+        Assert.Equal(second, infoHashes[1]);
+    }
+
+    [Fact]
     public void Announce_Tracks_Counts_And_Excludes_Current_Peer()
     {
         var store = CreateStore();
@@ -171,6 +189,46 @@ public sealed class TrackerTests
     }
 
     [Fact]
+    public void Scrape_Includes_Configured_Icecold_Seed_When_PeerWire_Is_Enabled()
+    {
+        var store = CreateStore(new IcecoldOptions
+        {
+            PeerWire = new PeerWireOptions
+            {
+                Enabled = true,
+                AdvertisedIp = "127.0.0.10",
+                AdvertisedPort = 6881
+            }
+        });
+
+        var result = store.Scrape(new string('a', 40));
+
+        Assert.Equal(1, result.Complete);
+        Assert.Equal(0, result.Incomplete);
+        Assert.Equal(0, result.Downloaded);
+    }
+
+    [Fact]
+    public void Scrape_Response_Uses_Raw_InfoHash_Key()
+    {
+        var infoHash = Enumerable.Range(0, 20).Select(i => (byte)i).ToArray();
+        var response = TrackerResponse.Scrape(new TrackerScrapeResult(
+        [
+            new TrackerScrapeEntry(infoHash, new TrackerScrapeStats(1, 2, 3))
+        ]));
+
+        var expected = new byte[]
+            {
+                (byte)'d', (byte)'5', (byte)':', (byte)'f', (byte)'i', (byte)'l', (byte)'e', (byte)'s', (byte)'d',
+                (byte)'2', (byte)'0', (byte)':'
+            }
+            .Concat(infoHash)
+            .Concat("d8:completei1e10:downloadedi3e10:incompletei2eeee"u8.ToArray())
+            .ToArray();
+        Assert.Equal(expected, response);
+    }
+
+    [Fact]
     public async Task Tracker_Service_Rejects_Unregistered_Torrent_Before_Peer_Store()
     {
         var options = new DbContextOptionsBuilder<IcecoldDbContext>()
@@ -216,6 +274,12 @@ public sealed class TrackerTests
         {
             WasCalled = true;
             return new TrackerAnnounceResult([], 0, 0, TimeSpan.FromMinutes(30), TimeSpan.FromMinutes(5));
+        }
+
+        public TrackerScrapeStats Scrape(string infoHashHex)
+        {
+            WasCalled = true;
+            return new TrackerScrapeStats(0, 0, 0);
         }
     }
 }

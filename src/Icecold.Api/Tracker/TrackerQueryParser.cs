@@ -69,6 +69,38 @@ public static class TrackerQueryParser
         return true;
     }
 
+    public static bool TryParseScrape(HttpRequest request, out IReadOnlyList<byte[]> infoHashes, out string failureReason)
+    {
+        infoHashes = [];
+        failureReason = "";
+
+        Dictionary<string, List<byte[]>> parameters;
+        try
+        {
+            parameters = ParseRawQuery(request.QueryString.Value ?? "");
+        }
+        catch (FormatException ex)
+        {
+            failureReason = ex.Message;
+            return false;
+        }
+
+        if (!parameters.TryGetValue("info_hash", out var parsedInfoHashes) || parsedInfoHashes.Count == 0)
+        {
+            failureReason = "info_hash is required";
+            return false;
+        }
+
+        if (parsedInfoHashes.Any(hash => hash.Length != 20))
+        {
+            failureReason = "info_hash must be exactly 20 bytes";
+            return false;
+        }
+
+        infoHashes = parsedInfoHashes;
+        return true;
+    }
+
     static IPAddress ResolveIpAddress(HttpRequest request, Dictionary<string, List<byte[]>> parameters)
     {
         if (TryGetString(parameters, "ip", out var ipText) && IPAddress.TryParse(ipText, out var provided))

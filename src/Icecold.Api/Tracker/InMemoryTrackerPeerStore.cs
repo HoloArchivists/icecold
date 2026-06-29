@@ -11,6 +11,7 @@ public sealed class InMemoryTrackerPeerStore(
 {
     readonly object gate = new();
     readonly Dictionary<string, Dictionary<string, PeerEntry>> torrents = new(StringComparer.Ordinal);
+    readonly Dictionary<string, long> completedCounts = new(StringComparer.Ordinal);
 
     public TrackerAnnounceResult Announce(TrackerAnnounceInput input)
     {
@@ -32,12 +33,16 @@ public sealed class InMemoryTrackerPeerStore(
 
             Expire(peers, now, timeout);
 
+            var hadIncompletePeer = peers.TryGetValue(peerKey, out var previous) && previous.Left > 0;
             if (string.Equals(input.Event, "stopped", StringComparison.OrdinalIgnoreCase))
             {
                 peers.Remove(peerKey);
             }
             else
             {
+                if (string.Equals(input.Event, "completed", StringComparison.OrdinalIgnoreCase) && (!peers.ContainsKey(peerKey) || hadIncompletePeer))
+                    completedCounts[input.InfoHashHex] = completedCounts.GetValueOrDefault(input.InfoHashHex) + 1;
+
                 peers[peerKey] = new PeerEntry(
                     input.PeerId,
                     input.IpAddress,
@@ -63,6 +68,27 @@ public sealed class InMemoryTrackerPeerStore(
                 .Select(p => new PeerSnapshot(p.Value.PeerId, p.Value.IpAddress, p.Value.Port, p.Value.Left)));
 
             return new TrackerAnnounceResult(selected, complete, existingIncomplete, interval, minInterval);
+        }
+    }
+
+    public TrackerScrapeStats Scrape(string infoHashHex)
+    {
+        var trackerOptions = options.Value.Tracker;
+        var now = DateTimeOffset.UtcNow;
+        var timeout = TimeSpan.FromSeconds(trackerOptions.PeerTimeoutSeconds);
+
+        lock (gate)
+        {
+            if (!torrents.TryGetValue(infoHashHex, out var peers))
+                peers = [];
+            else
+                Expire(peers, now, timeout);
+
+            var existingComplete = peers.Values.Count(p => p.Left == 0);
+            var existingIncomplete = peers.Count - existingComplete;
+            var hasAdvertisedPeer = advertisedPeerProvider.TryGetPeer(out _);
+            var complete = existingComplete + (hasAdvertisedPeer ? 1 : 0);
+            return new TrackerScrapeStats(complete, existingIncomplete, completedCounts.GetValueOrDefault(infoHashHex));
         }
     }
 

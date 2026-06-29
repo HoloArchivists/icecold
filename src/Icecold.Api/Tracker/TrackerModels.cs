@@ -26,3 +26,9 @@ public sealed record TrackerAnnounceResult(
     int Incomplete,
     TimeSpan Interval,
     TimeSpan MinInterval);
+
+public sealed record TrackerScrapeStats(int Complete, int Incomplete, long Downloaded);
+
+public sealed record TrackerScrapeEntry(byte[] InfoHash, TrackerScrapeStats Stats);
+
+public sealed record TrackerScrapeResult(IReadOnlyList<TrackerScrapeEntry> Files);

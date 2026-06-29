@@ -43,6 +43,26 @@ public static class TrackerResponse
         return Bencode.Encode(response);
     }
 
+    public static byte[] Scrape(TrackerScrapeResult result)
+    {
+        using var stream = new MemoryStream();
+        WriteAscii(stream, "d5:filesd");
+        foreach (var file in result.Files.OrderBy(file => file.InfoHash, ByteArrayComparer.Instance))
+        {
+            WriteBytes(stream, file.InfoHash);
+            WriteAscii(stream, "d8:complete");
+            WriteInteger(stream, file.Stats.Complete);
+            WriteAscii(stream, "10:downloaded");
+            WriteInteger(stream, file.Stats.Downloaded);
+            WriteAscii(stream, "10:incomplete");
+            WriteInteger(stream, file.Stats.Incomplete);
+            WriteAscii(stream, "e");
+        }
+
+        WriteAscii(stream, "ee");
+        return stream.ToArray();
+    }
+
     static byte[] BuildCompactPeers(IReadOnlyList<PeerSnapshot> peers, AddressFamily addressFamily)
     {
         using var stream = new MemoryStream();
@@ -54,5 +74,47 @@ public static class TrackerResponse
         }
 
         return stream.ToArray();
+    }
+
+    static void WriteBytes(Stream stream, byte[] bytes)
+    {
+        WriteAscii(stream, bytes.Length.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        stream.WriteByte((byte)':');
+        stream.Write(bytes);
+    }
+
+    static void WriteInteger(Stream stream, long value)
+    {
+        stream.WriteByte((byte)'i');
+        WriteAscii(stream, value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        stream.WriteByte((byte)'e');
+    }
+
+    static void WriteAscii(Stream stream, string text)
+        => stream.Write(System.Text.Encoding.ASCII.GetBytes(text));
+
+    sealed class ByteArrayComparer : IComparer<byte[]>
+    {
+        public static readonly ByteArrayComparer Instance = new();
+
+        public int Compare(byte[]? x, byte[]? y)
+        {
+            if (ReferenceEquals(x, y))
+                return 0;
+            if (x is null)
+                return -1;
+            if (y is null)
+                return 1;
+
+            var length = Math.Min(x.Length, y.Length);
+            for (var i = 0; i < length; i++)
+            {
+                var compared = x[i].CompareTo(y[i]);
+                if (compared != 0)
+                    return compared;
+            }
+
+            return x.Length.CompareTo(y.Length);
+        }
     }
 }

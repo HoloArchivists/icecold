@@ -47,6 +47,7 @@ builder.Services.AddScoped<AdminApiKeyAuthorizationFilter>();
 builder.Services.AddScoped<IndexFileService>();
 builder.Services.AddScoped<TorrentMetadataService>();
 builder.Services.AddScoped<TrackerAnnounceService>();
+builder.Services.AddScoped<TrackerScrapeService>();
 builder.Services.AddScoped<WebSeedService>();
 builder.Services.AddHostedService<IndexingWorker>();
 builder.Services.AddHostedService<PeerWireServer>();
