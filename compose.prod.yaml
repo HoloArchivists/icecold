@@ -1,0 +1,39 @@
+services:
+  api:
+    image: ghcr.io/holoarchivists/icecold:${ICECOLD_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://0.0.0.0:8080
+      ConnectionStrings__Icecold: Host=postgres;Port=5432;Database=${POSTGRES_DB:-icecold};Username=${POSTGRES_USER:-icecold};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      Icecold__PublicBaseUrl: ${ICECOLD_PUBLIC_BASE_URL:?ICECOLD_PUBLIC_BASE_URL is required}
+      Icecold__AdminApiKey: ${ICECOLD_ADMIN_API_KEY:?ICECOLD_ADMIN_API_KEY is required}
+      Icecold__Database__AutoMigrate: ${ICECOLD_AUTO_MIGRATE:-true}
+      Icecold__ContentSources__0__Name: ${ICECOLD_CONTENT_SOURCE_NAME:-local}
+      Icecold__ContentSources__0__Type: local
+      Icecold__ContentSources__0__RootPath: /data/files
+    ports:
+      - "${ICECOLD_HTTP_PORT:-8080}:8080"
+    volumes:
+      - ${ICECOLD_CONTENT_ROOT:?ICECOLD_CONTENT_ROOT is required}:/data/files:ro
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-icecold}
+      POSTGRES_USER: ${POSTGRES_USER:-icecold}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-icecold} -d ${POSTGRES_DB:-icecold}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  postgres-data:

@@ -1,4 +1,30 @@
 services:
+  api:
+    image: mcr.microsoft.com/dotnet/sdk:10.0
+    working_dir: /workspace
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://0.0.0.0:5038
+      DOTNET_USE_POLLING_FILE_WATCHER: "1"
+      ConnectionStrings__Icecold: Host=postgres;Port=5432;Database=icecold;Username=icecold;Password=icecold
+      Icecold__PublicBaseUrl: http://localhost:5038
+      Icecold__AdminApiKey: dev-admin-key
+    ports:
+      - "5038:5038"
+    volumes:
+      - .:/workspace
+      - nuget-packages:/root/.nuget/packages
+    command: >
+      sh -c "dotnet tool restore
+      && dotnet restore src/Icecold.Api/Icecold.Api.csproj
+      && dotnet tool run dotnet-ef database update
+      --project src/Icecold.Api/Icecold.Api.csproj
+      --startup-project src/Icecold.Api/Icecold.Api.csproj
+      && dotnet watch --project src/Icecold.Api/Icecold.Api.csproj run --no-launch-profile"
+
   postgres:
     image: postgres:16-alpine
     environment:
@@ -9,6 +35,12 @@ services:
       - "55432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U icecold -d icecold"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
 
 volumes:
+  nuget-packages:
   postgres-data:

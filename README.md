@@ -13,108 +13,75 @@ BitTorrent peers take over as clients begin sharing with each other.
 
 ## What It Does
 
-- Lets an admin request indexing for a file in a configured content source.
-- Hashes the file in the background and stores the resulting torrent metadata.
+- Indexes files from a configured archive or content directory.
+- Generates one BitTorrent torrent per indexed file.
 - Serves `.torrent` files and magnet links for ready content.
-- Helps download clients find each other through its built-in tracker.
-- Provides the first copy of cold files from the backing store when no peers have them yet.
-- Reuses existing records when the same file version is indexed again.
-- Avoids duplicate torrent storage when different indexed files resolve to the same content.
-- Protects local file sources with a configured root, traversal checks, and symlink rejection.
-- Runs as a local ASP.NET Core app or as a Docker image.
+- Runs a built-in tracker so clients can discover each other.
+- Provides cold file bytes from the backing store through HTTP WebSeed.
+- Runs as a local ASP.NET Core app or a Docker image.
 
 ## Current Limits
 
 - Only single-file indexing is implemented. Folder indexing currently returns `501 Not Implemented`.
+- Icecold currently serves file bytes only through HTTP WebSeed. Acting as a BitTorrent peer/seeder over peer-wire is planned but not implemented yet.
 - The tracker peer store is in-memory and single-instance.
 - The only implemented content source is the local filesystem.
 - S3 or HTTP-backed storage should fit the existing `IContentSource` boundary, but those sources are not implemented yet.
 - This is not hardened as a public multi-tenant service.
 
-## Run Locally
+## Quick Production Deployment
 
-Start PostgreSQL:
-
-```bash
-docker compose up -d postgres
-```
-
-The compose file maps PostgreSQL to host port `55432` to avoid colliding with an existing local Postgres on `5432`.
-
-Restore tools and apply the schema:
-
-```bash
-dotnet tool restore
-dotnet tool run dotnet-ef database update \
-  --project src/Icecold.Api/Icecold.Api.csproj \
-  --startup-project src/Icecold.Api/Icecold.Api.csproj
-```
-
-Create a sample file under the configured local source. Relative source roots are resolved from the API content root:
-
-```bash
-mkdir -p src/Icecold.Api/data/files
-printf 'hello from icecold\n' > src/Icecold.Api/data/files/example.txt
-```
-
-Run the service:
-
-```bash
-dotnet run --project src/Icecold.Api/Icecold.Api.csproj --launch-profile http
-```
-
-Swagger UI is available in local development at:
+Published images are built by GitHub Actions and pushed to:
 
 ```text
-http://localhost:5038/swagger
+ghcr.io/holoarchivists/icecold
 ```
 
-The raw OpenAPI documents are available at `/swagger/v1/swagger.json` and `/openapi/v1.json`.
+Use [compose.prod.yaml](compose.prod.yaml) for a single-host deployment. It runs the
+published API image and a PostgreSQL container, mounts your archive read-only into the API
+container, and applies EF migrations on startup by default.
 
-## Docker
-
-Build the API image from the repo root:
+Create a `.env` file next to `compose.prod.yaml`:
 
 ```bash
-docker build -t icecold-api:local .
+POSTGRES_PASSWORD=replace-with-a-long-random-password
+ICECOLD_ADMIN_API_KEY=replace-with-a-long-random-admin-key
+ICECOLD_PUBLIC_BASE_URL=https://icecold.example.org
+ICECOLD_CONTENT_ROOT=/srv/archive/files
+ICECOLD_HTTP_PORT=8080
+ICECOLD_IMAGE_TAG=latest
 ```
 
-Run it against the local PostgreSQL container and mount the local file source into the container:
+Start it:
 
 ```bash
-docker run --rm -p 18080:8080 \
-  --add-host=host.docker.internal:host-gateway \
-  -v "$PWD/src/Icecold.Api/data/files:/data/files:ro" \
-  -e ConnectionStrings__Icecold='Host=host.docker.internal;Port=55432;Database=icecold;Username=icecold;Password=icecold' \
-  -e Icecold__PublicBaseUrl='http://localhost:18080' \
-  -e Icecold__AdminApiKey='replace-with-a-secret' \
-  -e Icecold__ContentSources__0__Name='local' \
-  -e Icecold__ContentSources__0__Type='local' \
-  -e Icecold__ContentSources__0__RootPath='/data/files' \
-  icecold-api:local
+docker compose -f compose.prod.yaml up -d
 ```
 
-Mount real content roots into the container and point `Icecold__ContentSources__0__RootPath`
-at the mounted path before indexing. The Docker build context intentionally ignores local data
-directories so large backing stores are not copied into the image.
+The production compose file intentionally requires `POSTGRES_PASSWORD`,
+`ICECOLD_ADMIN_API_KEY`, `ICECOLD_PUBLIC_BASE_URL`, and `ICECOLD_CONTENT_ROOT`.
+`ICECOLD_CONTENT_ROOT` is mounted read-only at `/data/files` inside the API container.
 
-Index a file:
+Set `ICECOLD_AUTO_MIGRATE=false` if you want to manage database migrations separately.
+For internet-facing deployments, put Icecold behind a reverse proxy or load balancer that
+terminates TLS and forwards traffic to `ICECOLD_HTTP_PORT`.
+
+## Use The API
+
+Index a file from the configured content source:
 
 ```bash
-curl -i http://localhost:5038/api/index/file \
+curl -i http://localhost:8080/api/index/file \
   -H 'Content-Type: application/json' \
-  -H 'X-Icecold-Admin-Key: dev-admin-key' \
+  -H 'X-Icecold-Admin-Key: replace-with-a-long-random-admin-key' \
   -d '{"source":"local","path":"example.txt"}'
 ```
-
-For the Docker command above, use `http://localhost:18080` and the value supplied through
-`Icecold__AdminApiKey`.
 
 Poll the returned `/api/torrents/{id}` URL until `status` is `Ready`, then use:
 
 ```bash
-curl -OJ http://localhost:5038/torrents/{infoHash}.torrent
-curl http://localhost:5038/torrents/{infoHash}/magnet
+curl -OJ http://localhost:8080/torrents/{infoHash}.torrent
+curl http://localhost:8080/torrents/{infoHash}/magnet
 ```
 
 Submitting the same `{ source, path }` again is idempotent after path normalization and metadata lookup:
@@ -128,6 +95,64 @@ If different source files build the same BitTorrent info hash, the first complet
 the canonical `Ready` torrent and later rows become `Duplicate` aliases with `duplicateOfId`
 pointing to the canonical row.
 
+## Development
+
+The default [compose.yaml](compose.yaml) is for local development, not production.
+It uses the .NET SDK image, mounts this repo at `/workspace`, applies EF migrations,
+and runs the API with `dotnet watch`.
+
+```bash
+docker compose up
+```
+
+The dev API is available at:
+
+```text
+http://localhost:5038
+```
+
+Swagger UI is available in local development at:
+
+```text
+http://localhost:5038/swagger
+```
+
+The raw OpenAPI documents are available at `/swagger/v1/swagger.json` and `/openapi/v1.json`.
+
+To create a sample file under the default dev content source:
+
+```bash
+mkdir -p src/Icecold.Api/data/files
+printf 'hello from icecold\n' > src/Icecold.Api/data/files/example.txt
+```
+
+For manual local development without the API container, start only PostgreSQL:
+
+```bash
+docker compose up -d postgres
+```
+
+Then restore tools, apply the schema, and run the API:
+
+```bash
+dotnet tool restore
+dotnet tool run dotnet-ef database update \
+  --project src/Icecold.Api/Icecold.Api.csproj \
+  --startup-project src/Icecold.Api/Icecold.Api.csproj
+dotnet run --project src/Icecold.Api/Icecold.Api.csproj --launch-profile http
+```
+
+PostgreSQL is exposed on host port `55432` to avoid colliding with an existing local
+Postgres on `5432`.
+
+## Build A Local Image
+
+For a quick local image build from the repo root:
+
+```bash
+docker build -t icecold-api:local .
+```
+
 ## Configuration
 
 Main settings live under `Icecold` in `appsettings.json`:
@@ -138,7 +163,9 @@ Main settings live under `Icecold` in `appsettings.json`:
 - `Tracker:*`: announce intervals, peer timeout, and max peer response size.
 - `ContentSources`: named sources. V1 supports `Type: "local"` with a required, non-blank `RootPath`.
 
-`Database:AutoMigrate` is available but defaults to `false`; use the EF CLI migration command above for local setup.
+`Database:AutoMigrate` defaults to `false` in app configuration. The production Compose file
+sets it to `true` by default through `ICECOLD_AUTO_MIGRATE`; set `ICECOLD_AUTO_MIGRATE=false`
+if you want to manage migrations yourself.
 
 ## Test
 

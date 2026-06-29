@@ -6,5 +6,7 @@ TestResults/
 coverage/
 data/files/
 src/Icecold.Api/data/files/
+.env
+.env.*
 *.user
 *.suo
