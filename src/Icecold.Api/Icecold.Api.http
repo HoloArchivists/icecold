@@ -1,0 +1,23 @@
+@Icecold.Api_HostAddress = http://localhost:5038
+@AdminKey = dev-admin-key
+
+GET {{Icecold.Api_HostAddress}}/health
+Accept: application/json
+
+###
+
+POST {{Icecold.Api_HostAddress}}/api/index/file
+Content-Type: application/json
+X-Icecold-Admin-Key: {{AdminKey}}
+
+{
+  "source": "local",
+  "path": "example.bin"
+}
+
+###
+
+GET {{Icecold.Api_HostAddress}}/api/torrents/00000000-0000-0000-0000-000000000000
+X-Icecold-Admin-Key: {{AdminKey}}
+
+###

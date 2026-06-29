@@ -1,0 +1,10 @@
+bin/
+obj/
+.vs/
+.vscode/
+TestResults/
+coverage/
+data/files/
+src/Icecold.Api/data/files/
+*.user
+*.suo
