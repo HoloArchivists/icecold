@@ -3,6 +3,7 @@
     <Project Path="src/Icecold.Api/Icecold.Api.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Icecold.LoadTests/Icecold.LoadTests.csproj" />
     <Project Path="tests/Icecold.Tests/Icecold.Tests.csproj" />
   </Folder>
 </Solution>

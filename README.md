@@ -184,6 +184,60 @@ For a quick local image build from the repo root:
 docker build -t icecold-api:local .
 ```
 
+## Load And E2E Testing
+
+The load runner in [tests/Icecold.LoadTests](tests/Icecold.LoadTests) is a console tool
+for repeatable smoke and throughput checks. It prints a JSON report and can also write
+the report to a file with `--output`.
+
+Run a self-contained E2E smoke test with real PostgreSQL through Testcontainers:
+
+```bash
+dotnet run -c Release --project tests/Icecold.LoadTests -- e2e-smoke --file-size-mib 64
+```
+
+Run indexing load against a live local/dev instance:
+
+```bash
+dotnet run -c Release --project tests/Icecold.LoadTests -- index-many \
+  --base-url http://localhost:5038 \
+  --admin-key dev-admin-key \
+  --content-root src/Icecold.Api/data/files \
+  --files 1000 \
+  --file-size-kib 64 \
+  --concurrency 32
+```
+
+Measure webseed throughput:
+
+```bash
+dotnet run -c Release --project tests/Icecold.LoadTests -- webseed-throughput \
+  --base-url http://localhost:5038 \
+  --content-root src/Icecold.Api/data/files \
+  --file-size-mib 1024 \
+  --clients 4
+```
+
+Measure peer-wire throughput, including multi-leecher and MSE cases:
+
+```bash
+dotnet run -c Release --project tests/Icecold.LoadTests -- peerwire-throughput \
+  --base-url http://localhost:5038 \
+  --content-root src/Icecold.Api/data/files \
+  --peer-host 127.0.0.1 \
+  --peer-port 6881 \
+  --file-size-mib 1024 \
+  --clients 1 \
+  --encrypted true \
+  --outstanding 256
+```
+
+For peer-wire throughput tests, prefer a Release API build. With dev Compose:
+
+```bash
+ICECOLD_DOTNET_CONFIGURATION=Release docker compose up -d --force-recreate api
+```
+
 ## Configuration
 
 Main settings live under `Icecold` in `appsettings.json`:
