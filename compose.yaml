@@ -29,7 +29,9 @@ services:
       && dotnet tool run dotnet-ef database update
       --project src/Icecold.Api/Icecold.Api.csproj
       --startup-project src/Icecold.Api/Icecold.Api.csproj
-      && dotnet watch --project src/Icecold.Api/Icecold.Api.csproj run --no-launch-profile"
+      && dotnet watch --project src/Icecold.Api/Icecold.Api.csproj run
+      --configuration ${ICECOLD_DOTNET_CONFIGURATION:-Debug}
+      --no-launch-profile"
 
   postgres:
     image: postgres:16-alpine

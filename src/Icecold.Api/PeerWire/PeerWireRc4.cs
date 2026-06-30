@@ -28,14 +28,41 @@ public sealed class PeerWireRc4
 
     public void Discard(int byteCount)
     {
+        var localState = state;
+        var localI = i;
+        var localJ = j;
         for (var index = 0; index < byteCount; index++)
-            Next();
+        {
+            localI = unchecked((byte)(localI + 1));
+            var si = localState[localI];
+            localJ = unchecked((byte)(localJ + si));
+            var sj = localState[localJ];
+            localState[localI] = sj;
+            localState[localJ] = si;
+        }
+
+        i = localI;
+        j = localJ;
     }
 
     public void Process(Span<byte> buffer)
     {
+        var localState = state;
+        var localI = i;
+        var localJ = j;
         for (var index = 0; index < buffer.Length; index++)
-            buffer[index] ^= Next();
+        {
+            localI = unchecked((byte)(localI + 1));
+            var si = localState[localI];
+            localJ = unchecked((byte)(localJ + si));
+            var sj = localState[localJ];
+            localState[localI] = sj;
+            localState[localJ] = si;
+            buffer[index] ^= localState[unchecked((byte)(si + sj))];
+        }
+
+        i = localI;
+        j = localJ;
     }
 
     public void Process(ReadOnlySpan<byte> source, Span<byte> destination)
@@ -43,18 +70,28 @@ public sealed class PeerWireRc4
         if (destination.Length < source.Length)
             throw new ArgumentException("RC4 destination buffer is too small.", nameof(destination));
 
+        var localState = state;
+        var localI = i;
+        var localJ = j;
         for (var index = 0; index < source.Length; index++)
-            destination[index] = (byte)(source[index] ^ Next());
-    }
+        {
+            localI = unchecked((byte)(localI + 1));
+            var si = localState[localI];
+            localJ = unchecked((byte)(localJ + si));
+            var sj = localState[localJ];
+            localState[localI] = sj;
+            localState[localJ] = si;
+            destination[index] = (byte)(source[index] ^ localState[unchecked((byte)(si + sj))]);
+        }
 
-    byte Next()
-    {
-        i = unchecked((byte)(i + 1));
-        j = unchecked((byte)(j + state[i]));
-        Swap(i, j);
-        return state[unchecked((byte)(state[i] + state[j]))];
+        i = localI;
+        j = localJ;
     }
 
     void Swap(int left, int right)
-        => (state[left], state[right]) = (state[right], state[left]);
+    {
+        var value = state[left];
+        state[left] = state[right];
+        state[right] = value;
+    }
 }

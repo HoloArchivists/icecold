@@ -143,6 +143,13 @@ For peer-wire testing through dev Compose, set `Icecold:PeerWire:AdvertisedIp` i
 client. The dev compose file enables the listener but intentionally leaves the advertised
 peer endpoint to app configuration.
 
+Dev Compose runs a Debug build by default. For peer-wire throughput testing, use the
+published production image or run the dev container in Release mode:
+
+```bash
+ICECOLD_DOTNET_CONFIGURATION=Release docker compose up
+```
+
 To create a sample file under the default dev content source:
 
 ```bash
