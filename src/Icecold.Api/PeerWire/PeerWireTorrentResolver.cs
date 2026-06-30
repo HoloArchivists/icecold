@@ -15,13 +15,32 @@ public sealed class PeerWireTorrentResolver(IServiceScopeFactory scopeFactory, C
         var torrent = await db.Torrents.AsNoTracking()
             .FirstOrDefaultAsync(t => t.InfoHashHex == normalized && t.Status == TorrentStatus.Ready, cancellationToken);
 
+        return await BuildContextAsync(torrent, normalized, cancellationToken);
+    }
+
+    public async Task<PeerWireTorrentContext?> ResolveByMseObfuscatedHashAsync(string obfuscatedHashHex, CancellationToken cancellationToken)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<IcecoldDbContext>();
+        var normalized = obfuscatedHashHex.ToLowerInvariant();
+        var torrent = await db.Torrents.AsNoTracking()
+            .FirstOrDefaultAsync(t => t.MseObfuscatedHashHex == normalized && t.Status == TorrentStatus.Ready, cancellationToken);
+
+        return await BuildContextAsync(torrent, torrent?.InfoHashHex?.ToLowerInvariant(), cancellationToken);
+    }
+
+    async Task<PeerWireTorrentContext?> BuildContextAsync(
+        TorrentRecord? torrent,
+        string? expectedInfoHashHex,
+        CancellationToken cancellationToken)
+    {
         if (torrent is null || torrent.PieceLength is null || torrent.PieceCount is null || torrent.TorrentBytes is null)
             return null;
 
         if (!PeerWireBencode.TryExtractTorrentInfo(torrent.TorrentBytes, out var infoBytes))
             return null;
 
-        if (!string.Equals(InfoHashUtil.Sha1Hex(infoBytes), normalized, StringComparison.Ordinal))
+        if (!string.Equals(InfoHashUtil.Sha1Hex(infoBytes), expectedInfoHashHex, StringComparison.Ordinal))
             return null;
 
         var source = sources.GetRequired(torrent.SourceName);

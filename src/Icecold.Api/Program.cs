@@ -51,6 +51,7 @@ builder.Services.AddScoped<TrackerAnnounceService>();
 builder.Services.AddScoped<TrackerScrapeService>();
 builder.Services.AddScoped<WebSeedService>();
 builder.Services.AddHostedService<IndexingWorker>();
+builder.Services.AddHostedService<PeerWireMseHashBackfillService>();
 builder.Services.AddHostedService<PeerWireServer>();
 
 var app = builder.Build();

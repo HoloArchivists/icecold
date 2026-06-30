@@ -1,6 +1,5 @@
 using System.Buffers;
 using System.Buffers.Binary;
-using System.Text;
 using Icecold.Api.Content;
 using Icecold.Api.Options;
 using Icecold.Api.Torrents;
@@ -14,7 +13,6 @@ public sealed class PeerWireConnectionHandler(
     IOptions<IcecoldOptions> options,
     ILogger<PeerWireConnectionHandler> logger)
 {
-    static readonly byte[] ProtocolName = Encoding.ASCII.GetBytes("BitTorrent protocol");
     const int ExtensionProtocolReservedByteIndex = 25;
     const byte ExtensionProtocolReservedBit = 0x10;
     const byte LocalMetadataExtensionId = 1;
@@ -79,14 +77,14 @@ public sealed class PeerWireConnectionHandler(
     async Task<PeerWireHandshake?> ReadHandshakeAsync(Stream stream, CancellationToken cancellationToken)
     {
         var pstrlen = await PeerWireStreamIo.ReadByteAsync(stream, cancellationToken);
-        if (pstrlen != ProtocolName.Length)
+        if (pstrlen != PeerWireProtocol.ProtocolName.Length)
             return null;
 
         var protocol = new byte[pstrlen];
         if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, protocol, cancellationToken))
             return null;
 
-        if (!protocol.AsSpan().SequenceEqual(ProtocolName))
+        if (!protocol.AsSpan().SequenceEqual(PeerWireProtocol.ProtocolName))
             return null;
 
         var reservedAndHashes = new byte[48];
@@ -221,8 +219,8 @@ public sealed class PeerWireConnectionHandler(
     async Task WriteHandshakeAsync(Stream stream, byte[] infoHash, CancellationToken cancellationToken)
     {
         var handshake = new byte[68];
-        handshake[0] = (byte)ProtocolName.Length;
-        ProtocolName.CopyTo(handshake.AsSpan(1));
+        handshake[0] = (byte)PeerWireProtocol.ProtocolName.Length;
+        PeerWireProtocol.ProtocolName.CopyTo(handshake.AsSpan(1));
         handshake[ExtensionProtocolReservedByteIndex] = ExtensionProtocolReservedBit;
         infoHash.CopyTo(handshake.AsSpan(28));
         identity.PeerId.CopyTo(handshake.AsSpan(48));

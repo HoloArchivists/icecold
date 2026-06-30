@@ -1,6 +1,7 @@
 using Icecold.Api.Content;
 using Icecold.Api.Data;
 using Icecold.Api.Options;
+using Icecold.Api.PeerWire;
 using Icecold.Api.Torrents;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -122,6 +123,7 @@ public sealed class IndexingWorker(
 
                 var completedAt = DateTimeOffset.UtcNow;
                 torrent.InfoHashHex = result.InfoHashHex;
+                torrent.MseObfuscatedHashHex = PeerWireMse.HashReq2Hex(result.InfoHashHex);
                 torrent.PieceLength = result.PieceLength;
                 torrent.PieceCount = result.PieceCount;
                 torrent.Error = null;

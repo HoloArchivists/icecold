@@ -17,11 +17,15 @@ public sealed class IcecoldDbContext(DbContextOptions<IcecoldDbContext> options)
         torrent.Property(t => t.ContentVersion).HasMaxLength(512);
         torrent.Property(t => t.Status).HasConversion<string>().HasMaxLength(32).IsRequired();
         torrent.Property(t => t.InfoHashHex).HasMaxLength(40);
+        torrent.Property(t => t.MseObfuscatedHashHex).HasMaxLength(40);
         torrent.Property(t => t.TorrentBytes);
         torrent.Property(t => t.Error).HasMaxLength(4096);
         torrent.HasIndex(t => t.InfoHashHex)
             .IsUnique()
             .HasFilter("\"InfoHashHex\" IS NOT NULL AND \"Status\" = 'Ready'");
+        torrent.HasIndex(t => t.MseObfuscatedHashHex)
+            .IsUnique()
+            .HasFilter("\"MseObfuscatedHashHex\" IS NOT NULL AND \"Status\" = 'Ready'");
         torrent.HasIndex(t => t.DuplicateOfId);
         torrent.HasIndex(t => t.Status);
         torrent.HasIndex(t => new { t.SourceName, t.SourcePath });

@@ -20,6 +20,8 @@ public sealed class TorrentRecord
 
     public string? InfoHashHex { get; set; }
 
+    public string? MseObfuscatedHashHex { get; set; }
+
     public Guid? DuplicateOfId { get; set; }
 
     public byte[]? TorrentBytes { get; set; }

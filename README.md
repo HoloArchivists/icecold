@@ -17,13 +17,13 @@ BitTorrent peers take over as clients begin sharing with each other.
 - Generates one BitTorrent torrent per indexed file.
 - Serves `.torrent` files and magnet links for ready content.
 - Runs a built-in tracker so clients can discover each other.
-- Provides cold file bytes from the backing store through HTTP WebSeed and plain TCP peer-wire seeding.
+- Provides cold file bytes from the backing store through HTTP WebSeed and TCP peer-wire seeding with optional MSE/RC4 protocol encryption.
 - Runs as a local ASP.NET Core app or a Docker image.
 
 ## Current Limits
 
 - Only single-file indexing is implemented. Folder indexing currently returns `501 Not Implemented`.
-- Peer-wire support is upload-only plain TCP, including `ut_metadata` for magnet clients. Icecold does not download from peers, initiate outbound peer connections, support uTP, or support protocol encryption yet.
+- Peer-wire support is upload-only TCP, including `ut_metadata` for magnet clients and MSE/RC4 protocol encryption. Icecold does not download from peers, initiate outbound peer connections, or support uTP yet.
 - The tracker peer store is in-memory and single-instance.
 - The only implemented content source is the local filesystem.
 - S3 or HTTP-backed storage should fit the existing `IContentSource` boundary, but those sources are not implemented yet.

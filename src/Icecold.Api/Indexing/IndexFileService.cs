@@ -121,6 +121,7 @@ public sealed class IndexFileService(
         torrent.Status = TorrentStatus.Pending;
         torrent.Error = null;
         torrent.InfoHashHex = null;
+        torrent.MseObfuscatedHashHex = null;
         torrent.DuplicateOfId = null;
         torrent.TorrentBytes = null;
         torrent.PieceLength = null;
