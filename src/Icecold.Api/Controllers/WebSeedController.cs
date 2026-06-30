@@ -1,19 +1,24 @@
 using Icecold.Api.Api;
+using Icecold.Api.Options;
 using Icecold.Api.Torrents;
 using Icecold.Api.WebSeed;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using Microsoft.Net.Http.Headers;
 
 namespace Icecold.Api.Controllers;
 
 [ApiController]
-public sealed class WebSeedController(WebSeedService webSeed) : ControllerBase
+public sealed class WebSeedController(WebSeedService webSeed, IOptions<IcecoldOptions> options) : ControllerBase
 {
     const string InvalidInfoHashMessage = "infoHash must be a 40 character hex SHA-1 info hash";
 
     [HttpGet("/webseed/{infoHash}/{**fileName}")]
     public async Task<IActionResult> Get(string infoHash, string? fileName, CancellationToken cancellationToken)
     {
+        if (!options.Value.WebSeed.Enabled)
+            return NotFound();
+
         if (!InfoHashUtil.IsHexInfoHash(infoHash))
             return BadRequest(new ProblemDetailsDto(InvalidInfoHashMessage));
 

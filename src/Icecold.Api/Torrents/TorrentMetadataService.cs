@@ -1,5 +1,6 @@
 using Icecold.Api.Data;
 using Microsoft.EntityFrameworkCore;
+using MonoTorrent.BEncoding;
 
 namespace Icecold.Api.Torrents;
 
@@ -11,7 +12,7 @@ public sealed class TorrentMetadataService(IcecoldDbContext db, PublicUrlBuilder
         if (torrent?.TorrentBytes is null)
             return null;
 
-        return new TorrentFileResult($"{torrent.DisplayName}.torrent", torrent.TorrentBytes);
+        return new TorrentFileResult($"{torrent.DisplayName}.torrent", NormalizeTorrentBytes(torrent));
     }
 
     public async Task<string?> GetMagnetAsync(string infoHash, CancellationToken cancellationToken)
@@ -25,6 +26,19 @@ public sealed class TorrentMetadataService(IcecoldDbContext db, PublicUrlBuilder
         var normalized = infoHash.ToLowerInvariant();
         return await db.Torrents.AsNoTracking()
             .FirstOrDefaultAsync(t => t.InfoHashHex == normalized && t.Status == TorrentStatus.Ready, cancellationToken);
+    }
+
+    byte[] NormalizeTorrentBytes(TorrentRecord torrent)
+    {
+        var decoded = BEncodedDictionary.DecodeTorrent(torrent.TorrentBytes!).torrent;
+        var webSeedKey = new BEncodedString("url-list");
+
+        if (urls.WebSeedEnabled)
+            decoded[webSeedKey] = new BEncodedString(urls.BuildWebSeedUrl(torrent.InfoHashHex!, torrent.DisplayName));
+        else
+            decoded.Remove(webSeedKey);
+
+        return decoded.Encode();
     }
 }
 

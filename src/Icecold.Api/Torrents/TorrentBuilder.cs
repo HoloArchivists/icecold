@@ -29,15 +29,16 @@ public sealed class TorrentBuilder(PublicUrlBuilder urls)
 
         var infoBytes = Bencode.Encode(info);
         var infoHash = InfoHashUtil.Sha1Hex(infoBytes);
-        var webSeedUrl = urls.BuildWebSeedUrl(infoHash, torrentName);
+        var webSeedUrl = urls.WebSeedEnabled ? urls.BuildWebSeedUrl(infoHash, torrentName) : null;
 
         var torrent = new Dictionary<string, object>(StringComparer.Ordinal)
         {
             ["announce"] = urls.TrackerAnnounceUrl,
             ["created by"] = CreatedBy,
-            ["info"] = info,
-            ["url-list"] = webSeedUrl
+            ["info"] = info
         };
+        if (webSeedUrl is not null)
+            torrent["url-list"] = webSeedUrl;
 
         return new TorrentBuildResult(
             Bencode.Encode(torrent),
@@ -109,4 +110,4 @@ public sealed record TorrentBuildResult(
     string InfoHashHex,
     int PieceLength,
     int PieceCount,
-    string WebSeedUrl);
+    string? WebSeedUrl);

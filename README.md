@@ -21,7 +21,7 @@ The intended niche is sparse downloads from very large collections: archives, da
 - Generates one BitTorrent torrent per indexed file
 - Serves `.torrent` files and magnet links for ready content
 - Runs a built-in tracker so clients can discover each other
-- Seeds file bytes from the backing store via HTTP WebSeed and TCP peer-wire, with optional MSE/RC4 encryption
+- Seeds file bytes from the backing store via configurable HTTP WebSeed and/or TCP peer-wire, with optional MSE/RC4 encryption
 - Tracks multiple verified backing locations per torrent, with failover from hot to cold paths as files are moved
 - Runs as a local ASP.NET Core app or a Docker image
 
@@ -53,6 +53,10 @@ ICECOLD_ADMIN_API_KEY=replace-with-a-long-random-admin-key
 ICECOLD_PUBLIC_BASE_URL=https://icecold.example.org
 ICECOLD_CONTENT_ROOT=/srv/archive/files
 ICECOLD_HTTP_PORT=8080
+ICECOLD_WEBSEED_ENABLED=true
+# Optional: use a different public origin for advertised webseed URLs, for example a CDN.
+ICECOLD_WEBSEED_PUBLIC_BASE_URL=
+ICECOLD_PEERWIRE_ENABLED=true
 ICECOLD_PEERWIRE_ADVERTISED_IP=203.0.113.10
 ICECOLD_PEERWIRE_PORT=6881
 ICECOLD_PEERWIRE_ADVERTISED_PORT=6881
@@ -62,7 +66,7 @@ ICECOLD_UID=1000
 ICECOLD_GID=1000
 ```
 
-The first five variables and `ICECOLD_PEERWIRE_ADVERTISED_IP` are required. The advertised peer-wire address must be an IP — BitTorrent compact peer responses can't carry a DNS name. Set `ICECOLD_UID`/`ICECOLD_GID` if the container needs a specific host identity to read the content root.
+`POSTGRES_PASSWORD`, `ICECOLD_ADMIN_API_KEY`, `ICECOLD_PUBLIC_BASE_URL`, and `ICECOLD_CONTENT_ROOT` are required. If peer-wire is enabled, `ICECOLD_PEERWIRE_ADVERTISED_IP` is also required and must be an IP — BitTorrent compact peer responses can't carry a DNS name. Set `ICECOLD_UID`/`ICECOLD_GID` if the container needs a specific host identity to read the content root.
 
 ### Start
 
@@ -74,7 +78,9 @@ docker compose -f compose.prod.yaml up -d
 
 - `ICECOLD_CONTENT_ROOT` is mounted read-only at `/data/files` inside the container.
 - Set `ICECOLD_AUTO_MIGRATE=false` to manage database migrations separately.
-- For internet-facing deployments, put Icecold behind a reverse proxy that terminates TLS. Peer-wire uses plain TCP on `ICECOLD_PEERWIRE_PORT` and must be reachable directly by BitTorrent clients.
+- Set `ICECOLD_WEBSEED_ENABLED=false` for peer-wire-only serving, or `ICECOLD_PEERWIRE_ENABLED=false` for webseed-only serving. Icecold refuses to start if both are disabled.
+- Set `ICECOLD_WEBSEED_PUBLIC_BASE_URL` when `.torrent` files and magnets should advertise webseed URLs through a CDN or different reverse-proxy origin. Leave it empty to use `ICECOLD_PUBLIC_BASE_URL`.
+- For internet-facing deployments, put Icecold behind a reverse proxy that terminates TLS. If peer-wire is enabled, it uses plain TCP on `ICECOLD_PEERWIRE_PORT` and must be reachable directly by BitTorrent clients.
 
 ## API
 
@@ -141,7 +147,7 @@ Settings live under `Icecold` in `appsettings.json`:
 
 | Key | Default | Description |
 |---|---|---|
-| `PublicBaseUrl` | — | Base URL embedded into tracker announce URLs and `.torrent` webseed metadata |
+| `PublicBaseUrl` | — | Base URL embedded into tracker announce URLs and, when webseed is enabled, webseed metadata |
 | `AdminApiKey` | — | Required in the `X-Icecold-Admin-Key` header for all `/api/*` endpoints. Absent in base config — provide via environment variable or secret in production; `appsettings.Development.json` sets it to `dev-admin-key` |
 | `Database:AutoMigrate` | `false` | Run pending EF Core migrations automatically on startup. The production Compose file sets this via `ICECOLD_AUTO_MIGRATE` |
 | `Indexing:MaxConcurrency` | `1` | Number of parallel hashing workers processing the indexing queue |
@@ -152,7 +158,9 @@ Settings live under `Icecold` in `appsettings.json`:
 | `Tracker:MaxPeersReturned` | `200` | Maximum number of peers returned in a single announce response |
 | `Tracker:MaxPeersStoredPerTorrent` | `1000` | Maximum peers retained per infohash before evicting least-recently announced peers |
 | `Tracker:PruneIntervalSeconds` | `300` | Background pruning interval for expired peers and empty infohash buckets |
-| `PeerWire:Enabled` | `false` | Enable the upload-only TCP peer-wire seeding listener |
+| `WebSeed:Enabled` | `true` | Enable HTTP webseed serving and advertise `/webseed` URLs in `.torrent` files and magnet links. At least one of `WebSeed:Enabled` or `PeerWire:Enabled` must be true |
+| `WebSeed:PublicBaseUrl` | — | Optional public origin for advertised webseed URLs. Leave empty to use `PublicBaseUrl`; set it for a CDN or separate webseed reverse proxy |
+| `PeerWire:Enabled` | `false` | Enable the upload-only TCP peer-wire seeding listener. At least one of `WebSeed:Enabled` or `PeerWire:Enabled` must be true |
 | `PeerWire:BindAddress` | `0.0.0.0` | Local IP to bind the listener; `0.0.0.0` listens on all interfaces |
 | `PeerWire:ListenPort` | `6881` | TCP port to accept incoming peer connections on |
 | `PeerWire:AdvertisedIp` | — | Public IP advertised in tracker responses. Must be an IP address — BitTorrent compact peer responses cannot carry DNS names. Required when `Enabled` is true |
@@ -168,7 +176,7 @@ Settings live under `Icecold` in `appsettings.json`:
 
 ## Development
 
-The default [compose.yaml](compose.yaml) uses the .NET SDK image, mounts this repo at `/workspace`, applies EF migrations, and runs the API with `dotnet watch`.
+The default [compose.yaml](compose.yaml) uses the .NET SDK image, mounts this repo at `/workspace`, applies EF migrations, and runs the API with `dotnet watch`. It enables both webseed and peer-wire serving by default.
 
 ```bash
 docker compose up

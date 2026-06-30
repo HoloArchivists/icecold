@@ -13,6 +13,7 @@ services:
       ConnectionStrings__Icecold: Host=postgres;Port=5432;Database=icecold;Username=icecold;Password=icecold
       Icecold__PublicBaseUrl: http://localhost:5038
       Icecold__AdminApiKey: dev-admin-key
+      Icecold__WebSeed__Enabled: ${ICECOLD_WEBSEED_ENABLED:-true}
       Icecold__PeerWire__Enabled: "true"
       Icecold__PeerWire__BindAddress: 0.0.0.0
       Icecold__PeerWire__ListenPort: 6881

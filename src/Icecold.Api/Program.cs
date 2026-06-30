@@ -25,6 +25,7 @@ builder.Services.AddOptions<IcecoldOptions>()
     .ValidateOnStart();
 builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, IndexingOptionsValidator>();
 builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, PeerWireOptionsValidator>();
+builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, ServingOptionsValidator>();
 builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, TrackerOptionsValidator>();
 
 builder.Services.AddDbContext<IcecoldDbContext>(options =>
