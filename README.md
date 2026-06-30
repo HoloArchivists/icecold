@@ -150,6 +150,8 @@ Settings live under `Icecold` in `appsettings.json`:
 | `Tracker:MinAnnounceIntervalSeconds` | `300` | Minimum reannounce interval returned to clients (5 min) |
 | `Tracker:PeerTimeoutSeconds` | `2700` | Time after which a peer that has stopped announcing is removed from the in-memory store (45 min) |
 | `Tracker:MaxPeersReturned` | `200` | Maximum number of peers returned in a single announce response |
+| `Tracker:MaxPeersStoredPerTorrent` | `1000` | Maximum peers retained per infohash before evicting least-recently announced peers |
+| `Tracker:PruneIntervalSeconds` | `300` | Background pruning interval for expired peers and empty infohash buckets |
 | `PeerWire:Enabled` | `false` | Enable the upload-only TCP peer-wire seeding listener |
 | `PeerWire:BindAddress` | `0.0.0.0` | Local IP to bind the listener; `0.0.0.0` listens on all interfaces |
 | `PeerWire:ListenPort` | `6881` | TCP port to accept incoming peer connections on |

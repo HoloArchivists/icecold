@@ -126,6 +126,59 @@ public sealed class TrackerTests
     }
 
     [Fact]
+    public void Announce_Evicts_Least_Recently_Seen_Peers_Over_Per_Torrent_Limit()
+    {
+        var store = CreateStore(new IcecoldOptions
+        {
+            Tracker = new TrackerOptions
+            {
+                MaxPeersStoredPerTorrent = 2,
+                MaxPeersReturned = 50
+            }
+        });
+        var infoHash = new string('a', 40);
+        var firstPeer = Enumerable.Repeat((byte)1, 20).ToArray();
+        var secondPeer = Enumerable.Repeat((byte)2, 20).ToArray();
+        var thirdPeer = Enumerable.Repeat((byte)3, 20).ToArray();
+
+        _ = store.Announce(CreateAnnounce(infoHash, firstPeer, "127.0.0.1", 6881));
+        Thread.Sleep(5);
+        _ = store.Announce(CreateAnnounce(infoHash, secondPeer, "127.0.0.2", 6882));
+        Thread.Sleep(5);
+        var result = store.Announce(CreateAnnounce(infoHash, thirdPeer, "127.0.0.3", 6883));
+
+        Assert.Single(result.Peers);
+        Assert.Equal(secondPeer, result.Peers[0].PeerId);
+        Assert.Equal(0, result.Complete);
+        Assert.Equal(2, result.Incomplete);
+        Assert.Equal(2, store.Scrape(infoHash).Incomplete);
+    }
+
+    [Fact]
+    public void PruneExpired_Removes_Expired_Peers_And_Empty_Buckets()
+    {
+        var store = CreateStore(new IcecoldOptions
+        {
+            Tracker = new TrackerOptions
+            {
+                PeerTimeoutSeconds = 1
+            }
+        });
+        var firstHash = new string('a', 40);
+        var secondHash = new string('b', 40);
+
+        _ = store.Announce(CreateAnnounce(firstHash, Enumerable.Repeat((byte)1, 20).ToArray(), "127.0.0.1", 6881));
+        _ = store.Announce(CreateAnnounce(secondHash, Enumerable.Repeat((byte)2, 20).ToArray(), "127.0.0.2", 6882));
+
+        var result = store.PruneExpired(DateTimeOffset.UtcNow.AddSeconds(2));
+
+        Assert.Equal(2, result.RemovedPeers);
+        Assert.Equal(2, result.RemovedTorrents);
+        Assert.Equal(0, store.Scrape(firstHash).Incomplete);
+        Assert.Equal(0, store.Scrape(secondHash).Incomplete);
+    }
+
+    [Fact]
     public void Announce_Includes_Configured_Icecold_Peer_When_PeerWire_Is_Enabled()
     {
         var store = CreateStore(new IcecoldOptions
@@ -255,8 +308,50 @@ public sealed class TrackerTests
         Assert.False(store.WasCalled);
     }
 
+    [Fact]
+    public void TrackerOptionsValidator_Rejects_Invalid_Prune_Settings()
+    {
+        var result = new TrackerOptionsValidator().Validate(null, new IcecoldOptions
+        {
+            Tracker = new TrackerOptions
+            {
+                AnnounceIntervalSeconds = 0,
+                MinAnnounceIntervalSeconds = 0,
+                PeerTimeoutSeconds = 0,
+                MaxPeersReturned = -1,
+                MaxPeersStoredPerTorrent = 0,
+                PruneIntervalSeconds = 0
+            }
+        });
+
+        Assert.True(result.Failed);
+        Assert.Contains("Icecold:Tracker:AnnounceIntervalSeconds must be at least 1.", result.Failures);
+        Assert.Contains("Icecold:Tracker:MinAnnounceIntervalSeconds must be at least 1.", result.Failures);
+        Assert.Contains("Icecold:Tracker:PeerTimeoutSeconds must be at least 1.", result.Failures);
+        Assert.Contains("Icecold:Tracker:MaxPeersReturned must be at least 0.", result.Failures);
+        Assert.Contains("Icecold:Tracker:MaxPeersStoredPerTorrent must be at least 1.", result.Failures);
+        Assert.Contains("Icecold:Tracker:PruneIntervalSeconds must be at least 1.", result.Failures);
+    }
+
     static string PercentEncode(IEnumerable<byte> bytes)
         => string.Concat(bytes.Select(b => "%" + b.ToString("x2")));
+
+    static TrackerAnnounceInput CreateAnnounce(
+        string infoHash,
+        byte[] peerId,
+        string ipAddress,
+        int port)
+        => new(
+            infoHash,
+            peerId,
+            IPAddress.Parse(ipAddress),
+            port,
+            0,
+            0,
+            10,
+            "started",
+            true,
+            50);
 
     static InMemoryTrackerPeerStore CreateStore(IcecoldOptions? options = null)
     {

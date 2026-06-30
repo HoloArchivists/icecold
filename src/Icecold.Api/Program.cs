@@ -25,6 +25,7 @@ builder.Services.AddOptions<IcecoldOptions>()
     .ValidateOnStart();
 builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, IndexingOptionsValidator>();
 builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, PeerWireOptionsValidator>();
+builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, TrackerOptionsValidator>();
 
 builder.Services.AddDbContext<IcecoldDbContext>(options =>
 {
@@ -45,7 +46,8 @@ builder.Services.AddSingleton<PeerWireAdvertisedPeerProvider>();
 builder.Services.AddSingleton<PeerWireTorrentResolver>();
 builder.Services.AddSingleton<PeerWireTransportNegotiator>();
 builder.Services.AddSingleton<PeerWireConnectionHandler>();
-builder.Services.AddSingleton<ITrackerPeerStore, InMemoryTrackerPeerStore>();
+builder.Services.AddSingleton<InMemoryTrackerPeerStore>();
+builder.Services.AddSingleton<ITrackerPeerStore>(services => services.GetRequiredService<InMemoryTrackerPeerStore>());
 builder.Services.AddScoped<AdminApiKeyAuthorizationFilter>();
 builder.Services.AddScoped<IndexingClaimService>();
 builder.Services.AddScoped<IndexFileService>();
@@ -56,6 +58,7 @@ builder.Services.AddScoped<WebSeedService>();
 builder.Services.AddHostedService<IndexingWorker>();
 builder.Services.AddHostedService<PeerWireMseHashBackfillService>();
 builder.Services.AddHostedService<PeerWireServer>();
+builder.Services.AddHostedService<TrackerPeerPruningService>();
 
 var app = builder.Build();
 

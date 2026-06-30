@@ -40,6 +40,10 @@ public sealed class TrackerOptions
     public int PeerTimeoutSeconds { get; set; } = 2700;
 
     public int MaxPeersReturned { get; set; } = 200;
+
+    public int MaxPeersStoredPerTorrent { get; set; } = 1000;
+
+    public int PruneIntervalSeconds { get; set; } = 300;
 }
 
 public sealed class PeerWireOptions
