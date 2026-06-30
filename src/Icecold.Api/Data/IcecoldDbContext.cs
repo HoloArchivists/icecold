@@ -26,6 +26,10 @@ public sealed class IcecoldDbContext(DbContextOptions<IcecoldDbContext> options)
         torrent.HasIndex(t => t.MseObfuscatedHashHex)
             .IsUnique()
             .HasFilter("\"MseObfuscatedHashHex\" IS NOT NULL AND \"Status\" = 'Ready'");
+        torrent.HasIndex(t => new { t.SourceName, t.SourcePath, t.ContentLength, t.ContentVersion })
+            .IsUnique()
+            .HasDatabaseName("IX_torrents_ContentIdentity")
+            .HasFilter("\"ContentVersion\" IS NOT NULL");
         torrent.HasIndex(t => t.DuplicateOfId);
         torrent.HasIndex(t => t.Status);
         torrent.HasIndex(t => new { t.SourceName, t.SourcePath });

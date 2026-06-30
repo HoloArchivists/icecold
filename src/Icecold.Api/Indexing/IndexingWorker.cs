@@ -16,6 +16,8 @@ public sealed class IndexingWorker(
     IOptions<IcecoldOptions> options,
     ILogger<IndexingWorker> logger) : BackgroundService
 {
+    const int MaxFinalizeAttempts = 16;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await RequeueInterruptedJobsAsync(stoppingToken);
@@ -84,36 +86,52 @@ public sealed class IndexingWorker(
 
             var result = await torrentBuilder.BuildSingleFileAsync(metadata, source, torrent.DisplayName, cancellationToken);
 
-            await FinalizeAsync(torrent.Id, result, cancellationToken);
+            if (!await FinalizeAsync(torrent.Id, result, cancellationToken))
+            {
+                await RequeueForRetryAsync(
+                    torrent.Id,
+                    "Torrent finalization hit repeated database conflicts.",
+                    cancellationToken);
+            }
+
             return;
         }
         catch (Exception ex) when (ex is ContentSourceException or IOException or UnauthorizedAccessException)
         {
-            torrent.Status = TorrentStatus.Failed;
-            torrent.Error = ex.Message;
-            torrent.UpdatedAt = DateTimeOffset.UtcNow;
             logger.LogWarning(ex, "Indexing failed for torrent {TorrentId}", torrentId);
+            await MarkFailedAsync(torrentId, ex.Message, cancellationToken);
+            return;
         }
-
-        await db.SaveChangesAsync(cancellationToken);
+        catch (Exception ex) when (DatabaseRetry.IsSerializationOrUniqueConflict(ex))
+        {
+            logger.LogWarning(ex, "Indexing database conflict for torrent {TorrentId}; requeueing.", torrentId);
+            await RequeueForRetryAsync(torrentId, "Indexing hit a transient database conflict.", cancellationToken);
+            return;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Indexing failed unexpectedly for torrent {TorrentId}", torrentId);
+            await MarkFailedAsync(torrentId, ex.Message, cancellationToken);
+            return;
+        }
     }
 
-    async Task FinalizeAsync(Guid torrentId, TorrentBuildResult result, CancellationToken cancellationToken)
+    async Task<bool> FinalizeAsync(Guid torrentId, TorrentBuildResult result, CancellationToken cancellationToken)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<IcecoldDbContext>();
 
-        for (var attempt = 0; attempt < 3; attempt++)
+        for (var attempt = 0; attempt < MaxFinalizeAttempts; attempt++)
         {
             await using var transaction = db.Database.IsRelational()
-                ? await db.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, cancellationToken)
+                ? await db.Database.BeginTransactionAsync(cancellationToken)
                 : null;
 
             try
             {
                 var torrent = await db.Torrents.FirstOrDefaultAsync(t => t.Id == torrentId, cancellationToken);
                 if (torrent is null || torrent.Status is TorrentStatus.Ready or TorrentStatus.Duplicate)
-                    return;
+                    return true;
 
                 var canonical = await db.Torrents
                     .Where(t => t.Id != torrentId && t.InfoHashHex == result.InfoHashHex && t.Status == TorrentStatus.Ready)
@@ -147,14 +165,83 @@ public sealed class IndexingWorker(
                 if (transaction is not null)
                     await transaction.CommitAsync(cancellationToken);
 
-                return;
+                return true;
             }
-            catch (Exception ex) when (DatabaseRetry.IsSerializationOrUniqueConflict(ex) && attempt < 2)
+            catch (Exception ex) when (DatabaseRetry.IsSerializationOrUniqueConflict(ex) && attempt < MaxFinalizeAttempts - 1)
             {
                 db.ChangeTracker.Clear();
+                await DelayForRetryAsync(attempt, cancellationToken);
             }
         }
 
-        throw new InvalidOperationException($"Could not finalize torrent '{torrentId}' after repeated concurrency conflicts.");
+        return false;
+    }
+
+    async Task RequeueForRetryAsync(Guid torrentId, string reason, CancellationToken cancellationToken)
+    {
+        await UpdateStatusWithRetryAsync(
+            torrentId,
+            torrent =>
+            {
+                if (torrent.Status is TorrentStatus.Ready or TorrentStatus.Duplicate)
+                    return false;
+
+                torrent.Status = TorrentStatus.Pending;
+                torrent.Error = reason;
+                torrent.UpdatedAt = DateTimeOffset.UtcNow;
+                return true;
+            },
+            cancellationToken);
+
+        await queue.EnqueueAsync(torrentId, CancellationToken.None);
+    }
+
+    async Task MarkFailedAsync(Guid torrentId, string error, CancellationToken cancellationToken)
+    {
+        await UpdateStatusWithRetryAsync(
+            torrentId,
+            torrent =>
+            {
+                if (torrent.Status is TorrentStatus.Ready or TorrentStatus.Duplicate)
+                    return false;
+
+                torrent.Status = TorrentStatus.Failed;
+                torrent.Error = error;
+                torrent.UpdatedAt = DateTimeOffset.UtcNow;
+                return true;
+            },
+            cancellationToken);
+    }
+
+    async Task UpdateStatusWithRetryAsync(
+        Guid torrentId,
+        Func<TorrentRecord, bool> update,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < MaxFinalizeAttempts; attempt++)
+        {
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<IcecoldDbContext>();
+
+            try
+            {
+                var torrent = await db.Torrents.FirstOrDefaultAsync(t => t.Id == torrentId, cancellationToken);
+                if (torrent is null || !update(torrent))
+                    return;
+
+                await db.SaveChangesAsync(cancellationToken);
+                return;
+            }
+            catch (Exception ex) when (DatabaseRetry.IsSerializationOrUniqueConflict(ex) && attempt < MaxFinalizeAttempts - 1)
+            {
+                await DelayForRetryAsync(attempt, cancellationToken);
+            }
+        }
+    }
+
+    static Task DelayForRetryAsync(int attempt, CancellationToken cancellationToken)
+    {
+        var delay = TimeSpan.FromMilliseconds(Math.Min(1000, 25 * (attempt + 1)));
+        return Task.Delay(delay, cancellationToken);
     }
 }

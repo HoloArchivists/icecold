@@ -1,4 +1,3 @@
-using System.Data;
 using Icecold.Api.Content;
 using Icecold.Api.Data;
 using Microsoft.EntityFrameworkCore;
@@ -10,6 +9,8 @@ public sealed class IndexFileService(
     IcecoldDbContext db,
     IIndexingQueue queue)
 {
+    const int MaxSubmitAttempts = 8;
+
     public async Task<IndexFileSubmission> SubmitFileAsync(IndexFileCommand command, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(command.Source) || string.IsNullOrWhiteSpace(command.Path))
@@ -39,27 +40,12 @@ public sealed class IndexFileService(
             return IndexFileSubmission.BadRequest(ex.Message);
         }
 
-        for (var attempt = 0; attempt < 3; attempt++)
+        for (var attempt = 0; attempt < MaxSubmitAttempts; attempt++)
         {
             var now = DateTimeOffset.UtcNow;
-            await using var transaction = db.Database.IsRelational()
-                ? await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
-                : null;
-
             try
             {
-                var existingCandidates = await db.Torrents
-                    .Where(t =>
-                        t.SourceName == metadata.SourceName
-                        && t.SourcePath == metadata.Path
-                        && t.ContentLength == metadata.Length
-                        && t.ContentVersion == metadata.Version)
-                    .ToListAsync(cancellationToken);
-
-                var existing = existingCandidates
-                    .OrderBy(TorrentRecordReuse.Priority)
-                    .ThenByDescending(t => t.UpdatedAt)
-                    .FirstOrDefault();
+                var existing = await FindReusableRecordAsync(metadata, cancellationToken);
 
                 if (existing is not null)
                 {
@@ -67,15 +53,10 @@ public sealed class IndexFileService(
                     {
                         ResetFailedRecord(existing, now);
                         await db.SaveChangesAsync(cancellationToken);
-                        if (transaction is not null)
-                            await transaction.CommitAsync(cancellationToken);
 
                         await queue.EnqueueAsync(existing.Id, CancellationToken.None);
                         return IndexFileSubmission.Accepted(existing);
                     }
-
-                    if (transaction is not null)
-                        await transaction.CommitAsync(cancellationToken);
 
                     return existing.Status is TorrentStatus.Ready or TorrentStatus.Duplicate
                         ? IndexFileSubmission.Completed(existing)
@@ -98,23 +79,44 @@ public sealed class IndexFileService(
 
                 db.Torrents.Add(torrent);
                 await db.SaveChangesAsync(cancellationToken);
-                if (transaction is not null)
-                    await transaction.CommitAsync(cancellationToken);
 
                 await queue.EnqueueAsync(torrent.Id, CancellationToken.None);
                 return IndexFileSubmission.Accepted(torrent);
             }
-            catch (Exception ex) when (DatabaseRetry.IsSerializationFailure(ex) && attempt < 2)
+            catch (Exception ex) when (DatabaseRetry.IsSerializationOrUniqueConflict(ex))
             {
                 db.ChangeTracker.Clear();
+                if (attempt == MaxSubmitAttempts - 1)
+                    break;
+
+                await DelayForRetryAsync(attempt, cancellationToken);
             }
         }
 
         return IndexFileSubmission.Conflict("Concurrent index request could not be serialized; retry the request.");
     }
 
+    async Task<TorrentRecord?> FindReusableRecordAsync(ContentMetadata metadata, CancellationToken cancellationToken)
+    {
+        var existingCandidates = await db.Torrents
+            .Where(t =>
+                t.SourceName == metadata.SourceName
+                && t.SourcePath == metadata.Path
+                && t.ContentLength == metadata.Length
+                && t.ContentVersion == metadata.Version)
+            .ToListAsync(cancellationToken);
+
+        return existingCandidates
+            .OrderBy(TorrentRecordReuse.Priority)
+            .ThenByDescending(t => t.UpdatedAt)
+            .FirstOrDefault();
+    }
+
     static string NormalizeDisplayName(string? requestedDisplayName, string metadataDisplayName)
         => string.IsNullOrWhiteSpace(requestedDisplayName) ? metadataDisplayName : requestedDisplayName;
+
+    static Task DelayForRetryAsync(int attempt, CancellationToken cancellationToken)
+        => Task.Delay(TimeSpan.FromMilliseconds(Math.Min(250, 10 * (attempt + 1))), cancellationToken);
 
     static void ResetFailedRecord(TorrentRecord torrent, DateTimeOffset now)
     {
