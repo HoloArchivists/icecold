@@ -20,24 +20,20 @@ public sealed class IndexingWorker(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await RequeueInterruptedJobsAsync(stoppingToken);
-
         var concurrency = Math.Max(1, options.Value.Indexing.MaxConcurrency);
         var workers = Enumerable.Range(0, concurrency)
             .Select(_ => RunWorkerAsync(stoppingToken))
             .ToArray();
 
+        await RequeueInterruptedJobsAsync(stoppingToken);
         await Task.WhenAll(workers);
     }
 
     async Task RequeueInterruptedJobsAsync(CancellationToken cancellationToken)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
-        var db = scope.ServiceProvider.GetRequiredService<IcecoldDbContext>();
-        var ids = await db.Torrents
-            .Where(t => t.Status == TorrentStatus.Pending || t.Status == TorrentStatus.Hashing)
-            .Select(t => t.Id)
-            .ToListAsync(cancellationToken);
+        var claims = scope.ServiceProvider.GetRequiredService<IndexingClaimService>();
+        var ids = await claims.ResetInterruptedAndListPendingAsync(cancellationToken);
 
         foreach (var id in ids)
             await queue.EnqueueAsync(id, cancellationToken);
@@ -65,17 +61,10 @@ public sealed class IndexingWorker(
     async Task ProcessAsync(Guid torrentId, CancellationToken cancellationToken)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
-        var db = scope.ServiceProvider.GetRequiredService<IcecoldDbContext>();
-        var torrent = await db.Torrents.FirstOrDefaultAsync(t => t.Id == torrentId, cancellationToken);
-        if (torrent is null || torrent.Status is TorrentStatus.Ready or TorrentStatus.Duplicate)
+        var claims = scope.ServiceProvider.GetRequiredService<IndexingClaimService>();
+        var torrent = await claims.ClaimForHashingAsync(torrentId, cancellationToken);
+        if (torrent is null)
             return;
-
-        var now = DateTimeOffset.UtcNow;
-        torrent.Status = TorrentStatus.Hashing;
-        torrent.Attempts++;
-        torrent.Error = null;
-        torrent.UpdatedAt = now;
-        await db.SaveChangesAsync(cancellationToken);
 
         try
         {

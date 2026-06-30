@@ -270,7 +270,7 @@ Main settings live under `Icecold` in `appsettings.json`:
 
 - `PublicBaseUrl`: base URL embedded into tracker and webseed metadata.
 - `AdminApiKey`: required value for private `/api/*` endpoints. The development key lives only in `appsettings.Development.json`; non-development deployments must provide a real value through environment, secret, or external configuration.
-- `Indexing:MaxConcurrency`: number of concurrent hashing workers.
+- `Indexing:MaxConcurrency` and `Indexing:QueueCapacity`: hashing worker count and bounded in-memory queue depth.
 - `Tracker:*`: announce intervals, peer timeout, and max peer response size.
 - `PeerWire:*`: upload-only TCP peer-wire listener, advertised peer endpoint, block size, connection cap, request queue tuning, handshake timeout, and idle read timeout.
 - `ContentSources`: named sources. V1 supports `Type: "local"` with a required, non-blank `RootPath`. Configure multiple local sources if you want separate hot/cold roots.

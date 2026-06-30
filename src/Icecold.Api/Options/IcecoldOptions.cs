@@ -27,6 +27,8 @@ public sealed class DatabaseOptions
 public sealed class IndexingOptions
 {
     public int MaxConcurrency { get; set; } = 1;
+
+    public int QueueCapacity { get; set; } = 10000;
 }
 
 public sealed class TrackerOptions

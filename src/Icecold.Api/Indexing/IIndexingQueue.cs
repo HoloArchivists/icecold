@@ -1,4 +1,6 @@
 using System.Threading.Channels;
+using Icecold.Api.Options;
+using Microsoft.Extensions.Options;
 
 namespace Icecold.Api.Indexing;
 
@@ -9,12 +11,14 @@ public interface IIndexingQueue
     IAsyncEnumerable<Guid> DequeueAllAsync(CancellationToken cancellationToken);
 }
 
-public sealed class ChannelIndexingQueue : IIndexingQueue
+public sealed class ChannelIndexingQueue(IOptions<IcecoldOptions> options) : IIndexingQueue
 {
-    readonly Channel<Guid> channel = Channel.CreateUnbounded<Guid>(new UnboundedChannelOptions
+    readonly Channel<Guid> channel = Channel.CreateBounded<Guid>(new BoundedChannelOptions(
+        Math.Max(1, options.Value.Indexing.QueueCapacity))
     {
         SingleReader = false,
-        SingleWriter = false
+        SingleWriter = false,
+        FullMode = BoundedChannelFullMode.Wait
     });
 
     public ValueTask EnqueueAsync(Guid torrentId, CancellationToken cancellationToken)

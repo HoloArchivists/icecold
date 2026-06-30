@@ -23,6 +23,7 @@ builder.Services.AddSwaggerGen(options =>
 builder.Services.AddOptions<IcecoldOptions>()
     .Bind(builder.Configuration.GetSection(IcecoldOptions.SectionName))
     .ValidateOnStart();
+builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, IndexingOptionsValidator>();
 builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, PeerWireOptionsValidator>();
 
 builder.Services.AddDbContext<IcecoldDbContext>(options =>
@@ -46,6 +47,7 @@ builder.Services.AddSingleton<PeerWireTransportNegotiator>();
 builder.Services.AddSingleton<PeerWireConnectionHandler>();
 builder.Services.AddSingleton<ITrackerPeerStore, InMemoryTrackerPeerStore>();
 builder.Services.AddScoped<AdminApiKeyAuthorizationFilter>();
+builder.Services.AddScoped<IndexingClaimService>();
 builder.Services.AddScoped<IndexFileService>();
 builder.Services.AddScoped<TorrentMetadataService>();
 builder.Services.AddScoped<TrackerAnnounceService>();
