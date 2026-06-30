@@ -229,7 +229,7 @@ public sealed class PeerWireConnectionHandler(
         await stream.WriteAsync(handshake, cancellationToken);
     }
 
-    static async Task WriteExtensionHandshakeAsync(
+    async Task WriteExtensionHandshakeAsync(
         Stream stream,
         PeerWireTorrentContext torrent,
         CancellationToken cancellationToken)
@@ -241,7 +241,7 @@ public sealed class PeerWireConnectionHandler(
                 ["ut_metadata"] = (long)LocalMetadataExtensionId
             },
             ["metadata_size"] = (long)torrent.InfoBytes.Length,
-            ["reqq"] = 128L,
+            ["reqq"] = (long)options.Value.PeerWire.MaxOutstandingRequests,
             ["v"] = "Icecold"
         });
 
@@ -395,17 +395,16 @@ public sealed class PeerWireConnectionHandler(
         PeerWirePieceRequest request,
         CancellationToken cancellationToken)
     {
-        var buffer = state.GetBlockBuffer(request.Length);
-        await ReadPieceBlockAsync(torrent, state, request, buffer.AsMemory(0, request.Length), cancellationToken);
+        const int headerLength = 13;
+        var buffer = state.GetBlockBuffer(headerLength + request.Length);
+        await ReadPieceBlockAsync(torrent, state, request, buffer.AsMemory(headerLength, request.Length), cancellationToken);
 
-        var prefix = new byte[13];
-        BinaryPrimitives.WriteInt32BigEndian(prefix.AsSpan(0, 4), 9 + request.Length);
-        prefix[4] = (byte)PeerWireMessageId.Piece;
-        BinaryPrimitives.WriteInt32BigEndian(prefix.AsSpan(5, 4), request.PieceIndex);
-        BinaryPrimitives.WriteInt32BigEndian(prefix.AsSpan(9, 4), request.Begin);
+        BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(0, 4), 9 + request.Length);
+        buffer[4] = (byte)PeerWireMessageId.Piece;
+        BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(5, 4), request.PieceIndex);
+        BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(9, 4), request.Begin);
 
-        await stream.WriteAsync(prefix, cancellationToken);
-        await stream.WriteAsync(buffer.AsMemory(0, request.Length), cancellationToken);
+        await stream.WriteAsync(buffer.AsMemory(0, headerLength + request.Length), cancellationToken);
         logger.LogDebug(
             "Peer-wire piece sent for {InfoHash}: piece {PieceIndex}, begin {Begin}, length {Length}.",
             torrent.InfoHashHex,

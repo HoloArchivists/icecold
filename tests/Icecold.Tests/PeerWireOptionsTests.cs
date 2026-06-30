@@ -19,11 +19,34 @@ public sealed class PeerWireOptionsTests
                 AdvertisedIp = "example.test",
                 AdvertisedPort = 6881,
                 MaxBlockLength = 16 * 1024,
+                MaxOutstandingRequests = 8192,
                 MaxConnections = 128
             }
         });
 
         Assert.True(result.Failed);
         Assert.Contains("Icecold:PeerWire:AdvertisedIp must be a valid IP address.", result.Failures);
+    }
+
+    [Fact]
+    public void Validate_Fails_When_Enabled_With_Invalid_Max_Outstanding_Requests()
+    {
+        var result = new PeerWireOptionsValidator().Validate(null, new IcecoldOptions
+        {
+            PeerWire = new PeerWireOptions
+            {
+                Enabled = true,
+                BindAddress = "0.0.0.0",
+                ListenPort = 6881,
+                AdvertisedIp = "192.168.0.150",
+                AdvertisedPort = 6881,
+                MaxBlockLength = 16 * 1024,
+                MaxOutstandingRequests = 0,
+                MaxConnections = 128
+            }
+        });
+
+        Assert.True(result.Failed);
+        Assert.Contains("Icecold:PeerWire:MaxOutstandingRequests must be between 1 and 100000.", result.Failures);
     }
 }

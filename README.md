@@ -185,7 +185,7 @@ Main settings live under `Icecold` in `appsettings.json`:
 - `AdminApiKey`: required value for private `/api/*` endpoints. The development key lives only in `appsettings.Development.json`; non-development deployments must provide a real value through environment, secret, or external configuration.
 - `Indexing:MaxConcurrency`: number of concurrent hashing workers.
 - `Tracker:*`: announce intervals, peer timeout, and max peer response size.
-- `PeerWire:*`: upload-only TCP peer-wire listener and advertised peer endpoint.
+- `PeerWire:*`: upload-only TCP peer-wire listener, advertised peer endpoint, block size, connection cap, and request queue tuning.
 - `ContentSources`: named sources. V1 supports `Type: "local"` with a required, non-blank `RootPath`.
 
 `Database:AutoMigrate` defaults to `false` in app configuration. The production Compose file

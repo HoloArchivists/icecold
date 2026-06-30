@@ -54,6 +54,8 @@ public sealed class PeerWireOptions
 
     public int MaxBlockLength { get; set; } = 16 * 1024;
 
+    public int MaxOutstandingRequests { get; set; } = 8192;
+
     public int MaxConnections { get; set; } = 128;
 }
 

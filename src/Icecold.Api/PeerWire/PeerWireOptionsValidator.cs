@@ -28,6 +28,9 @@ public sealed class PeerWireOptionsValidator : IValidateOptions<IcecoldOptions>
         if (peerWire.MaxBlockLength is < 1 or > (1024 * 1024))
             failures.Add("Icecold:PeerWire:MaxBlockLength must be between 1 and 1048576 bytes.");
 
+        if (peerWire.MaxOutstandingRequests is < 1 or > 100000)
+            failures.Add("Icecold:PeerWire:MaxOutstandingRequests must be between 1 and 100000.");
+
         if (peerWire.MaxConnections < 1)
             failures.Add("Icecold:PeerWire:MaxConnections must be at least 1.");
 
