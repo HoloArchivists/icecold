@@ -41,6 +41,7 @@ builder.Services.AddSingleton<IIndexingQueue, ChannelIndexingQueue>();
 builder.Services.AddSingleton<PeerWirePeerIdentity>();
 builder.Services.AddSingleton<PeerWireAdvertisedPeerProvider>();
 builder.Services.AddSingleton<PeerWireTorrentResolver>();
+builder.Services.AddSingleton<PeerWireTransportNegotiator>();
 builder.Services.AddSingleton<PeerWireConnectionHandler>();
 builder.Services.AddSingleton<ITrackerPeerStore, InMemoryTrackerPeerStore>();
 builder.Services.AddScoped<AdminApiKeyAuthorizationFilter>();

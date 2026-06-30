@@ -44,6 +44,32 @@ public sealed class PeerWireTests : IDisposable
     }
 
     [Fact]
+    public async Task TransportNegotiator_Preserves_Plaintext_Handshake_Byte()
+    {
+        await using var raw = new MemoryStream(new byte[] { 19, 1, 2, 3 });
+        var negotiator = new PeerWireTransportNegotiator(NullLogger<PeerWireTransportNegotiator>.Instance);
+
+        await using var negotiated = await negotiator.NegotiateAsync(raw, CancellationToken.None);
+
+        Assert.NotNull(negotiated);
+        var buffer = new byte[4];
+        var read = await negotiated.ReadAsync(buffer, CancellationToken.None);
+        Assert.Equal(buffer.Length, read);
+        Assert.Equal(new byte[] { 19, 1, 2, 3 }, buffer);
+    }
+
+    [Fact]
+    public async Task TransportNegotiator_Rejects_Unsupported_First_Byte()
+    {
+        await using var raw = new MemoryStream(new byte[] { 1, 2, 3 });
+        var negotiator = new PeerWireTransportNegotiator(NullLogger<PeerWireTransportNegotiator>.Instance);
+
+        var negotiated = await negotiator.NegotiateAsync(raw, CancellationToken.None);
+
+        Assert.Null(negotiated);
+    }
+
+    [Fact]
     public async Task Handler_Serves_Requested_Block()
     {
         var content = Encoding.ASCII.GetBytes("hello peer wire");

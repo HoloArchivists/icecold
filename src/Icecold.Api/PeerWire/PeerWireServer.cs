@@ -7,6 +7,7 @@ namespace Icecold.Api.PeerWire;
 
 public sealed class PeerWireServer(
     IOptions<IcecoldOptions> options,
+    PeerWireTransportNegotiator transportNegotiator,
     PeerWireConnectionHandler handler,
     ILogger<PeerWireServer> logger) : BackgroundService
 {
@@ -46,7 +47,9 @@ public sealed class PeerWireServer(
                     try
                     {
                         await using var stream = client.GetStream();
-                        await handler.HandleAsync(stream, stoppingToken);
+                        await using var peerWireStream = await transportNegotiator.NegotiateAsync(stream, stoppingToken);
+                        if (peerWireStream is not null)
+                            await handler.HandleAsync(peerWireStream, stoppingToken);
                     }
                     catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                     {
