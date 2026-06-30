@@ -39,4 +39,6 @@ public sealed class TorrentRecord
     public DateTimeOffset UpdatedAt { get; set; }
 
     public DateTimeOffset? CompletedAt { get; set; }
+
+    public List<TorrentLocationRecord> Locations { get; set; } = [];
 }

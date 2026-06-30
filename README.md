@@ -18,6 +18,7 @@ BitTorrent peers take over as clients begin sharing with each other.
 - Serves `.torrent` files and magnet links for ready content.
 - Runs a built-in tracker so clients can discover each other.
 - Provides cold file bytes from the backing store through HTTP WebSeed and TCP peer-wire seeding with optional MSE/RC4 protocol encryption.
+- Tracks multiple verified backing locations per torrent, so content can fail over from a hot path to a cold path while files are moved.
 - Runs as a local ASP.NET Core app or a Docker image.
 
 ## Current Limits
@@ -105,7 +106,32 @@ Submitting the same `{ source, path }` again is idempotent after path normalizat
 
 If different source files build the same BitTorrent info hash, the first completed row remains
 the canonical `Ready` torrent and later rows become `Duplicate` aliases with `duplicateOfId`
-pointing to the canonical row.
+pointing to the canonical row. The duplicate source path is also recorded as an alternate
+backing location for the canonical torrent.
+
+Manage backing locations for a ready torrent:
+
+```bash
+curl http://localhost:8080/api/torrents/{id}/locations \
+  -H 'X-Icecold-Admin-Key: replace-with-a-long-random-admin-key'
+
+curl -i http://localhost:8080/api/torrents/{id}/locations \
+  -H 'Content-Type: application/json' \
+  -H 'X-Icecold-Admin-Key: replace-with-a-long-random-admin-key' \
+  -d '{"source":"cold","path":"example.txt","makePrimary":false}'
+
+curl -i -X POST http://localhost:8080/api/torrents/{id}/locations/{locationId}/primary \
+  -H 'X-Icecold-Admin-Key: replace-with-a-long-random-admin-key'
+
+curl -i -X DELETE http://localhost:8080/api/torrents/{id}/locations/{locationId} \
+  -H 'X-Icecold-Admin-Key: replace-with-a-long-random-admin-key'
+```
+
+Adding a location hashes the requested file and only accepts it if it produces the same
+BitTorrent info hash with the torrent's display name. Serving prefers the active primary
+location, then lower-priority active locations, and then retries stale or missing locations
+after active candidates fail. `DELETE /api/torrents/{id}/locations/{locationId}` soft-disables
+that location rather than deleting its row.
 
 ## Development
 
@@ -247,7 +273,7 @@ Main settings live under `Icecold` in `appsettings.json`:
 - `Indexing:MaxConcurrency`: number of concurrent hashing workers.
 - `Tracker:*`: announce intervals, peer timeout, and max peer response size.
 - `PeerWire:*`: upload-only TCP peer-wire listener, advertised peer endpoint, block size, connection cap, and request queue tuning.
-- `ContentSources`: named sources. V1 supports `Type: "local"` with a required, non-blank `RootPath`.
+- `ContentSources`: named sources. V1 supports `Type: "local"` with a required, non-blank `RootPath`. Configure multiple local sources if you want separate hot/cold roots.
 
 `Database:AutoMigrate` defaults to `false` in app configuration. The production Compose file
 sets it to `true` by default through `ICECOLD_AUTO_MIGRATE`; set `ICECOLD_AUTO_MIGRATE=false`

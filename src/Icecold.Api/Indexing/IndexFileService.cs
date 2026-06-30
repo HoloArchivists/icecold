@@ -99,6 +99,7 @@ public sealed class IndexFileService(
     async Task<TorrentRecord?> FindReusableRecordAsync(ContentMetadata metadata, CancellationToken cancellationToken)
     {
         var existingCandidates = await db.Torrents
+            .Include(t => t.Locations)
             .Where(t =>
                 t.SourceName == metadata.SourceName
                 && t.SourcePath == metadata.Path

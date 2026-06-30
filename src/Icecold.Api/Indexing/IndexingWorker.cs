@@ -153,12 +153,14 @@ public sealed class IndexingWorker(
                     torrent.TorrentBytes = result.TorrentBytes;
                     torrent.DuplicateOfId = null;
                     torrent.Status = TorrentStatus.Ready;
+                    await UpsertIndexedLocationAsync(db, torrent, torrent.Id, makePrimary: true, completedAt, cancellationToken);
                 }
                 else
                 {
                     torrent.TorrentBytes = null;
                     torrent.DuplicateOfId = canonical.Id;
                     torrent.Status = TorrentStatus.Duplicate;
+                    await UpsertIndexedLocationAsync(db, torrent, canonical.Id, makePrimary: false, completedAt, cancellationToken);
                 }
 
                 await db.SaveChangesAsync(cancellationToken);
@@ -176,6 +178,89 @@ public sealed class IndexingWorker(
 
         return false;
     }
+
+    static async Task UpsertIndexedLocationAsync(
+        IcecoldDbContext db,
+        TorrentRecord indexedTorrent,
+        Guid canonicalTorrentId,
+        bool makePrimary,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var location = await db.TorrentLocations.FirstOrDefaultAsync(
+            l => l.TorrentId == canonicalTorrentId
+                && l.SourceName == indexedTorrent.SourceName
+                && l.SourcePath == indexedTorrent.SourcePath
+                && l.ContentLength == indexedTorrent.ContentLength
+                && l.ContentVersion == indexedTorrent.ContentVersion,
+            cancellationToken);
+
+        if (location is null)
+        {
+            location = new TorrentLocationRecord
+            {
+                Id = Guid.NewGuid(),
+                TorrentId = canonicalTorrentId,
+                SourceName = indexedTorrent.SourceName,
+                SourcePath = indexedTorrent.SourcePath,
+                ContentLength = indexedTorrent.ContentLength,
+                ContentVersion = indexedTorrent.ContentVersion,
+                ContentLastModified = indexedTorrent.ContentLastModified,
+                Status = TorrentLocationStatus.Active,
+                IsPrimary = false,
+                Priority = makePrimary ? 0 : await NextLocationPriorityAsync(db, canonicalTorrentId, cancellationToken),
+                LastVerifiedAt = now,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            db.TorrentLocations.Add(location);
+        }
+        else
+        {
+            location.ContentLastModified = indexedTorrent.ContentLastModified;
+            location.Status = TorrentLocationStatus.Active;
+            location.LastVerifiedAt = now;
+            location.LastError = null;
+            location.UpdatedAt = now;
+        }
+
+        if (!makePrimary && await HasActivePrimaryAsync(db, canonicalTorrentId, cancellationToken))
+            return;
+
+        var locations = await db.TorrentLocations
+            .Where(l => l.TorrentId == canonicalTorrentId)
+            .ToListAsync(cancellationToken);
+        if (!locations.Any(l => l.Id == location.Id))
+            locations.Add(location);
+
+        foreach (var current in locations)
+            current.IsPrimary = current.Id == location.Id;
+
+        location.Priority = 0;
+    }
+
+    static async Task<int> NextLocationPriorityAsync(
+        IcecoldDbContext db,
+        Guid torrentId,
+        CancellationToken cancellationToken)
+    {
+        var maxPriority = await db.TorrentLocations
+            .Where(l => l.TorrentId == torrentId)
+            .Select(l => (int?)l.Priority)
+            .MaxAsync(cancellationToken);
+
+        return (maxPriority ?? 0) + 10;
+    }
+
+    static Task<bool> HasActivePrimaryAsync(
+        IcecoldDbContext db,
+        Guid torrentId,
+        CancellationToken cancellationToken)
+        => db.TorrentLocations.AnyAsync(
+            l => l.TorrentId == torrentId
+                && l.Status == TorrentLocationStatus.Active
+                && l.IsPrimary,
+            cancellationToken);
 
     async Task RequeueForRetryAsync(Guid torrentId, string reason, CancellationToken cancellationToken)
     {

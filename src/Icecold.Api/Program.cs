@@ -37,6 +37,7 @@ builder.Services.AddDbContext<IcecoldDbContext>(options =>
 builder.Services.AddSingleton<ContentSourceRegistry>();
 builder.Services.AddSingleton<PublicUrlBuilder>();
 builder.Services.AddSingleton<TorrentBuilder>();
+builder.Services.AddSingleton<TorrentLocationService>();
 builder.Services.AddSingleton<IIndexingQueue, ChannelIndexingQueue>();
 builder.Services.AddSingleton<PeerWirePeerIdentity>();
 builder.Services.AddSingleton<PeerWireAdvertisedPeerProvider>();

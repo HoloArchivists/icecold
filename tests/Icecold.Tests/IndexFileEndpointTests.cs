@@ -100,6 +100,13 @@ public sealed class IndexFileEndpointTests : IDisposable
         var db = scope.ServiceProvider.GetRequiredService<IcecoldDbContext>();
         Assert.Equal(1, await db.Torrents.CountAsync(t => t.Status == TorrentStatus.Ready));
         Assert.Equal(1, await db.Torrents.CountAsync(t => t.Status == TorrentStatus.Duplicate));
+
+        var canonical = await db.Torrents
+            .Include(t => t.Locations)
+            .SingleAsync(t => t.Status == TorrentStatus.Ready);
+        Assert.Equal(2, canonical.Locations.Count);
+        Assert.Contains(canonical.Locations, l => l.SourcePath == "first.bin" && l.IsPrimary);
+        Assert.Contains(canonical.Locations, l => l.SourcePath == "second.bin" && !l.IsPrimary);
     }
 
     WebApplicationFactory<Program> CreateFactory(bool removeHostedServices = true)

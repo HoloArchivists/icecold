@@ -13,7 +13,8 @@ public sealed record IndexResponse(
     Guid? DuplicateOfId,
     int? PieceLength,
     int? PieceCount,
-    string? Error)
+    string? Error,
+    IReadOnlyList<TorrentLocationResponse> Locations)
 {
     public static IndexResponse From(TorrentRecord torrent)
         => new(
@@ -27,5 +28,11 @@ public sealed record IndexResponse(
             torrent.DuplicateOfId,
             torrent.PieceLength,
             torrent.PieceCount,
-            torrent.Error);
+            torrent.Error,
+            torrent.Locations
+                .OrderByDescending(l => l.IsPrimary)
+                .ThenBy(l => l.Priority)
+                .ThenBy(l => l.CreatedAt)
+                .Select(TorrentLocationResponse.From)
+                .ToList());
 }

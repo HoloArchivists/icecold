@@ -1,39 +1,29 @@
-using Icecold.Api.Content;
-using Icecold.Api.Data;
 using Icecold.Api.Torrents;
-using Microsoft.EntityFrameworkCore;
+using Icecold.Api.Content;
 
 namespace Icecold.Api.PeerWire;
 
-public sealed class PeerWireTorrentResolver(IServiceScopeFactory scopeFactory, ContentSourceRegistry sources)
+public sealed class PeerWireTorrentResolver(TorrentLocationService locations)
 {
     public async Task<PeerWireTorrentContext?> ResolveAsync(string infoHashHex, CancellationToken cancellationToken)
     {
-        await using var scope = scopeFactory.CreateAsyncScope();
-        var db = scope.ServiceProvider.GetRequiredService<IcecoldDbContext>();
         var normalized = infoHashHex.ToLowerInvariant();
-        var torrent = await db.Torrents.AsNoTracking()
-            .FirstOrDefaultAsync(t => t.InfoHashHex == normalized && t.Status == TorrentStatus.Ready, cancellationToken);
-
-        return await BuildContextAsync(torrent, normalized, cancellationToken);
+        var resolved = await locations.ResolveByInfoHashAsync(normalized, cancellationToken);
+        return BuildContext(resolved, normalized);
     }
 
     public async Task<PeerWireTorrentContext?> ResolveByMseObfuscatedHashAsync(string obfuscatedHashHex, CancellationToken cancellationToken)
     {
-        await using var scope = scopeFactory.CreateAsyncScope();
-        var db = scope.ServiceProvider.GetRequiredService<IcecoldDbContext>();
         var normalized = obfuscatedHashHex.ToLowerInvariant();
-        var torrent = await db.Torrents.AsNoTracking()
-            .FirstOrDefaultAsync(t => t.MseObfuscatedHashHex == normalized && t.Status == TorrentStatus.Ready, cancellationToken);
-
-        return await BuildContextAsync(torrent, torrent?.InfoHashHex?.ToLowerInvariant(), cancellationToken);
+        var resolved = await locations.ResolveByMseObfuscatedHashAsync(normalized, cancellationToken);
+        return BuildContext(resolved, resolved?.Torrent.InfoHashHex?.ToLowerInvariant());
     }
 
-    async Task<PeerWireTorrentContext?> BuildContextAsync(
-        TorrentRecord? torrent,
-        string? expectedInfoHashHex,
-        CancellationToken cancellationToken)
+    static PeerWireTorrentContext? BuildContext(
+        TorrentServingLocation? resolved,
+        string? expectedInfoHashHex)
     {
+        var torrent = resolved?.Torrent;
         if (torrent is null || torrent.PieceLength is null || torrent.PieceCount is null || torrent.TorrentBytes is null)
             return null;
 
@@ -43,15 +33,10 @@ public sealed class PeerWireTorrentResolver(IServiceScopeFactory scopeFactory, C
         if (!string.Equals(InfoHashUtil.Sha1Hex(infoBytes), expectedInfoHashHex, StringComparison.Ordinal))
             return null;
 
-        var source = sources.GetRequired(torrent.SourceName);
-        var metadata = await source.GetMetadataAsync(torrent.SourcePath, cancellationToken);
-        if (metadata.Length != torrent.ContentLength || metadata.Version != torrent.ContentVersion)
-            return null;
-
         return new PeerWireTorrentContext(
             torrent.InfoHashHex!,
-            source,
-            metadata.Path,
+            resolved!.Source,
+            resolved.Metadata.Path,
             torrent.ContentLength,
             torrent.PieceLength.Value,
             torrent.PieceCount.Value,

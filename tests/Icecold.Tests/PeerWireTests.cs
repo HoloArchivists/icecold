@@ -86,7 +86,7 @@ public sealed class PeerWireTests : IDisposable
         await using var db = CreateDb(torrentResult, metadata);
         await using var provider = CreateProvider(db);
         var handler = new PeerWireConnectionHandler(
-            new PeerWireTorrentResolver(new TestScopeFactory(provider), CreateRegistry()),
+            CreateResolver(provider),
             new PeerWirePeerIdentity(),
             Options.Create(new IcecoldOptions { PeerWire = new PeerWireOptions { Enabled = true, MaxBlockLength = 16 * 1024 } }),
             NullLogger<PeerWireConnectionHandler>.Instance);
@@ -134,7 +134,7 @@ public sealed class PeerWireTests : IDisposable
         await using var db = CreateDb(torrentResult, metadata);
         await using var provider = CreateProvider(db);
         var handler = new PeerWireConnectionHandler(
-            new PeerWireTorrentResolver(new TestScopeFactory(provider), CreateRegistry()),
+            CreateResolver(provider),
             new PeerWirePeerIdentity(),
             Options.Create(new IcecoldOptions { PeerWire = new PeerWireOptions { Enabled = true, MaxBlockLength = 16 * 1024 } }),
             NullLogger<PeerWireConnectionHandler>.Instance);
@@ -191,7 +191,7 @@ public sealed class PeerWireTests : IDisposable
         await using var db = CreateDb(torrentResult, metadata);
         await using var provider = CreateProvider(db);
         var handler = new PeerWireConnectionHandler(
-            new PeerWireTorrentResolver(new TestScopeFactory(provider), CreateRegistry()),
+            CreateResolver(provider),
             new PeerWirePeerIdentity(),
             Options.Create(new IcecoldOptions { PeerWire = new PeerWireOptions { Enabled = true, MaxBlockLength = 16 * 1024 } }),
             NullLogger<PeerWireConnectionHandler>.Instance);
@@ -247,7 +247,7 @@ public sealed class PeerWireTests : IDisposable
         await using var db = CreateEmptyDb();
         await using var provider = CreateProvider(db);
         var handler = new PeerWireConnectionHandler(
-            new PeerWireTorrentResolver(new TestScopeFactory(provider), CreateRegistry()),
+            CreateResolver(provider),
             new PeerWirePeerIdentity(),
             Options.Create(new IcecoldOptions { PeerWire = new PeerWireOptions { Enabled = true } }),
             NullLogger<PeerWireConnectionHandler>.Instance);
@@ -264,7 +264,8 @@ public sealed class PeerWireTests : IDisposable
     IcecoldDbContext CreateDb(TorrentBuildResult torrentResult, ContentMetadata metadata)
     {
         var db = CreateEmptyDb();
-        db.Torrents.Add(new TorrentRecord
+        var now = DateTimeOffset.UtcNow;
+        var torrent = new TorrentRecord
         {
             Id = Guid.NewGuid(),
             SourceName = "local",
@@ -278,9 +279,26 @@ public sealed class PeerWireTests : IDisposable
             PieceLength = torrentResult.PieceLength,
             PieceCount = torrentResult.PieceCount,
             TorrentBytes = torrentResult.TorrentBytes,
-            CreatedAt = DateTimeOffset.UtcNow,
-            UpdatedAt = DateTimeOffset.UtcNow,
-            CompletedAt = DateTimeOffset.UtcNow
+            CreatedAt = now,
+            UpdatedAt = now,
+            CompletedAt = now
+        };
+        db.Torrents.Add(torrent);
+        db.TorrentLocations.Add(new TorrentLocationRecord
+        {
+            Id = Guid.NewGuid(),
+            TorrentId = torrent.Id,
+            SourceName = metadata.SourceName,
+            SourcePath = metadata.Path,
+            ContentLength = metadata.Length,
+            ContentVersion = metadata.Version,
+            ContentLastModified = metadata.LastModified,
+            Status = TorrentLocationStatus.Active,
+            IsPrimary = true,
+            Priority = 0,
+            LastVerifiedAt = now,
+            CreatedAt = now,
+            UpdatedAt = now
         });
         db.SaveChanges();
         return db;
@@ -316,8 +334,20 @@ public sealed class PeerWireTests : IDisposable
 
     PeerWireTransportNegotiator CreateTransportNegotiator(ServiceProvider provider)
         => new(
-            new PeerWireTorrentResolver(new TestScopeFactory(provider), CreateRegistry()),
+            CreateResolver(provider),
             NullLogger<PeerWireTransportNegotiator>.Instance);
+
+    PeerWireTorrentResolver CreateResolver(ServiceProvider provider)
+    {
+        var urls = new PublicUrlBuilder(Options.Create(new IcecoldOptions { PublicBaseUrl = "http://example.test" }));
+        var locationService = new TorrentLocationService(
+            new TestScopeFactory(provider),
+            CreateRegistry(),
+            new TorrentBuilder(urls),
+            NullLogger<TorrentLocationService>.Instance);
+
+        return new PeerWireTorrentResolver(locationService);
+    }
 
     static byte[] BuildHandshake(byte[] infoHash, byte[] peerId, bool supportsExtensions = false)
     {

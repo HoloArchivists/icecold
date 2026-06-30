@@ -1,35 +1,46 @@
 using Icecold.Api.Content;
-using Icecold.Api.Data;
-using Microsoft.EntityFrameworkCore;
+using Icecold.Api.Torrents;
 using Microsoft.Net.Http.Headers;
 
 namespace Icecold.Api.WebSeed;
 
-public sealed class WebSeedService(IcecoldDbContext db, ContentSourceRegistry sources)
+public sealed class WebSeedService(TorrentLocationService locations)
 {
     public async Task<WebSeedOpenResult> OpenAsync(
         string infoHash,
         string? rangeHeader,
         CancellationToken cancellationToken)
     {
-        var normalized = infoHash.ToLowerInvariant();
-        var torrent = await db.Torrents.AsNoTracking()
-            .FirstOrDefaultAsync(t => t.InfoHashHex == normalized && t.Status == TorrentStatus.Ready, cancellationToken);
+        var attemptedLocations = new HashSet<Guid>();
+        while (true)
+        {
+            var resolved = await locations.ResolveByInfoHashAsync(infoHash, cancellationToken, attemptedLocations);
+            if (resolved is null)
+            {
+                if (attemptedLocations.Count > 0
+                    || await locations.ReadyTorrentExistsByInfoHashAsync(infoHash, cancellationToken))
+                {
+                    return WebSeedOpenResult.Conflict("No readable backing location is currently available for this torrent.");
+                }
 
-        if (torrent is null)
-            return WebSeedOpenResult.NotFound();
+                return WebSeedOpenResult.NotFound();
+            }
 
-        var source = sources.GetRequired(torrent.SourceName);
-        var metadata = await source.GetMetadataAsync(torrent.SourcePath, cancellationToken);
-        if (metadata.Length != torrent.ContentLength || metadata.Version != torrent.ContentVersion)
-            return WebSeedOpenResult.Conflict("Backing content changed since this torrent was indexed.");
+            var (offset, length, partial) = ParseRange(rangeHeader, resolved.Metadata.Length);
+            try
+            {
+                var stream = partial
+                    ? await resolved.Source.OpenRangeAsync(resolved.Metadata.Path, offset, length, cancellationToken)
+                    : await resolved.Source.OpenReadAsync(resolved.Metadata.Path, cancellationToken);
 
-        var (offset, length, partial) = ParseRange(rangeHeader, metadata.Length);
-        var stream = partial
-            ? await source.OpenRangeAsync(metadata.Path, offset, length, cancellationToken)
-            : await source.OpenReadAsync(metadata.Path, cancellationToken);
-
-        return WebSeedOpenResult.Opened(stream, offset, length, metadata.Length, partial);
+                return WebSeedOpenResult.Opened(stream, offset, length, resolved.Metadata.Length, partial);
+            }
+            catch (Exception ex) when (IsContentAccessFailure(ex))
+            {
+                attemptedLocations.Add(resolved.Location.Id);
+                await locations.ReportLocationFailureAsync(resolved.Location.Id, ex, cancellationToken);
+            }
+        }
     }
 
     static (long Offset, long Length, bool Partial) ParseRange(string? rangeHeader, long contentLength)
@@ -66,6 +77,9 @@ public sealed class WebSeedService(IcecoldDbContext db, ContentSourceRegistry so
         end = Math.Min(end, contentLength - 1);
         return (start, end - start + 1, true);
     }
+
+    static bool IsContentAccessFailure(Exception ex)
+        => ex is ContentSourceException or IOException or UnauthorizedAccessException;
 }
 
 public sealed record WebSeedOpenResult(

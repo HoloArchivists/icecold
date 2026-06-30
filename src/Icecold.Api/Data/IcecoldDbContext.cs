@@ -6,6 +6,8 @@ public sealed class IcecoldDbContext(DbContextOptions<IcecoldDbContext> options)
 {
     public DbSet<TorrentRecord> Torrents => Set<TorrentRecord>();
 
+    public DbSet<TorrentLocationRecord> TorrentLocations => Set<TorrentLocationRecord>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         var torrent = modelBuilder.Entity<TorrentRecord>();
@@ -37,5 +39,31 @@ public sealed class IcecoldDbContext(DbContextOptions<IcecoldDbContext> options)
             .WithMany()
             .HasForeignKey(t => t.DuplicateOfId)
             .OnDelete(DeleteBehavior.Restrict);
+
+        var location = modelBuilder.Entity<TorrentLocationRecord>();
+        location.ToTable("torrent_locations");
+        location.HasKey(l => l.Id);
+        location.Property(l => l.SourceName).HasMaxLength(128).IsRequired();
+        location.Property(l => l.SourcePath).HasMaxLength(4096).IsRequired();
+        location.Property(l => l.ContentVersion).HasMaxLength(512);
+        location.Property(l => l.Status).HasConversion<string>().HasMaxLength(32).IsRequired();
+        location.Property(l => l.LastError).HasMaxLength(4096);
+        location.HasIndex(l => l.TorrentId);
+        location.HasIndex(l => l.TorrentId)
+            .IsUnique()
+            .HasDatabaseName("IX_torrent_locations_Primary")
+            .HasFilter("\"IsPrimary\" = TRUE");
+        location.HasIndex(l => new { l.TorrentId, l.IsPrimary });
+        location.HasIndex(l => new { l.TorrentId, l.Priority });
+        location.HasIndex(l => l.Status);
+        location.HasIndex(l => new { l.SourceName, l.SourcePath });
+        location.HasIndex(l => new { l.TorrentId, l.SourceName, l.SourcePath, l.ContentLength, l.ContentVersion })
+            .IsUnique()
+            .HasDatabaseName("IX_torrent_locations_ContentIdentity")
+            .HasFilter("\"ContentVersion\" IS NOT NULL");
+        location.HasOne(l => l.Torrent)
+            .WithMany(t => t.Locations)
+            .HasForeignKey(l => l.TorrentId)
+            .OnDelete(DeleteBehavior.Cascade);
     }
 }
