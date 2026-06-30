@@ -261,6 +261,60 @@ public sealed class PeerWireTests : IDisposable
         Assert.Equal(0, await stream.ClientStream.ReadAsync(new byte[1], timeout.Token));
     }
 
+    [Fact]
+    public async Task Handler_Closes_Stalled_Handshake_After_Timeout()
+    {
+        await using var db = CreateEmptyDb();
+        await using var provider = CreateProvider(db);
+        var handler = new PeerWireConnectionHandler(
+            CreateResolver(provider),
+            new PeerWirePeerIdentity(),
+            Options.Create(new IcecoldOptions
+            {
+                PeerWire = new PeerWireOptions
+                {
+                    Enabled = true,
+                    HandshakeTimeoutSeconds = 1,
+                    IdleTimeoutSeconds = 120
+                }
+            }),
+            NullLogger<PeerWireConnectionHandler>.Instance);
+        await using var stream = new StallingReadStream([]);
+
+        await handler.HandleAsync(stream, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3));
+    }
+
+    [Fact]
+    public async Task Handler_Closes_Idle_Message_Read_After_Timeout()
+    {
+        var content = Encoding.ASCII.GetBytes("hello idle timeout");
+        await File.WriteAllBytesAsync(Path.Combine(root, "payload.bin"), content);
+        var source = new LocalFileContentSource("local", root);
+        var metadata = await source.GetMetadataAsync("payload.bin", CancellationToken.None);
+        var torrentResult = await new TorrentBuilder(new PublicUrlBuilder(Options.Create(new IcecoldOptions { PublicBaseUrl = "http://example.test" })))
+            .BuildSingleFileAsync(metadata, source, null, CancellationToken.None);
+        await using var db = CreateDb(torrentResult, metadata);
+        await using var provider = CreateProvider(db);
+        var handler = new PeerWireConnectionHandler(
+            CreateResolver(provider),
+            new PeerWirePeerIdentity(),
+            Options.Create(new IcecoldOptions
+            {
+                PeerWire = new PeerWireOptions
+                {
+                    Enabled = true,
+                    MaxBlockLength = 16 * 1024,
+                    HandshakeTimeoutSeconds = 1,
+                    IdleTimeoutSeconds = 1
+                }
+            }),
+            NullLogger<PeerWireConnectionHandler>.Instance);
+        await using var stream = new StallingReadStream(
+            BuildHandshake(Convert.FromHexString(torrentResult.InfoHashHex), Enumerable.Repeat((byte)'I', 20).ToArray()));
+
+        await handler.HandleAsync(stream, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3));
+    }
+
     IcecoldDbContext CreateDb(TorrentBuildResult torrentResult, ContentMetadata metadata)
     {
         var db = CreateEmptyDb();
@@ -335,6 +389,7 @@ public sealed class PeerWireTests : IDisposable
     PeerWireTransportNegotiator CreateTransportNegotiator(ServiceProvider provider)
         => new(
             CreateResolver(provider),
+            Options.Create(new IcecoldOptions { PeerWire = new PeerWireOptions() }),
             NullLogger<PeerWireTransportNegotiator>.Instance);
 
     PeerWireTorrentResolver CreateResolver(ServiceProvider provider)
@@ -549,6 +604,58 @@ public sealed class PeerWireTests : IDisposable
             decrypt.Process(encrypted);
             return encrypted;
         }
+    }
+
+    sealed class StallingReadStream(byte[] initialReadBytes) : Stream
+    {
+        int position;
+
+        public override bool CanRead => true;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => true;
+
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush() { }
+
+        public override Task FlushAsync(CancellationToken cancellationToken)
+            => Task.CompletedTask;
+
+        public override int Read(byte[] buffer, int offset, int count)
+            => throw new NotSupportedException();
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (position < initialReadBytes.Length)
+            {
+                var copied = Math.Min(buffer.Length, initialReadBytes.Length - position);
+                initialReadBytes.AsMemory(position, copied).CopyTo(buffer);
+                position += copied;
+                return copied;
+            }
+
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
+        }
+
+        public override long Seek(long offset, SeekOrigin origin)
+            => throw new NotSupportedException();
+
+        public override void SetLength(long value)
+            => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) { }
+
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+            => ValueTask.CompletedTask;
     }
 
     sealed class CombinedStream(Stream input, Stream output) : Stream

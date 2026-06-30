@@ -5,6 +5,8 @@ namespace Icecold.Api.PeerWire;
 
 static class PeerWireBencode
 {
+    public const int MaxNestingDepth = 32;
+
     public static bool TryExtractTorrentInfo(ReadOnlySpan<byte> torrentBytes, out byte[] infoBytes)
     {
         infoBytes = [];
@@ -18,7 +20,7 @@ static class PeerWireBencode
                 return false;
 
             var valueStart = index;
-            if (!TrySkipValue(torrentBytes, ref index))
+            if (!TrySkipValue(torrentBytes, ref index, depth: 1))
                 return false;
 
             if (key.SequenceEqual("info"u8))
@@ -35,7 +37,7 @@ static class PeerWireBencode
     {
         dictionary = [];
         var index = 0;
-        if (!TryReadDictionary(bytes, ref index, out dictionary))
+        if (!TryReadDictionary(bytes, ref index, depth: 1, out dictionary))
             return false;
 
         return index == bytes.Length;
@@ -65,7 +67,7 @@ static class PeerWireBencode
         return false;
     }
 
-    static bool TryReadValue(ReadOnlySpan<byte> bytes, ref int index, out object value)
+    static bool TryReadValue(ReadOnlySpan<byte> bytes, ref int index, int depth, out object value)
     {
         value = default!;
         if (index >= bytes.Length)
@@ -73,7 +75,7 @@ static class PeerWireBencode
 
         if (bytes[index] == (byte)'d')
         {
-            if (!TryReadDictionary(bytes, ref index, out var dictionary))
+            if (!TryReadDictionary(bytes, ref index, depth + 1, out var dictionary))
                 return false;
 
             value = dictionary;
@@ -82,7 +84,7 @@ static class PeerWireBencode
 
         if (bytes[index] == (byte)'l')
         {
-            if (!TryReadList(bytes, ref index, out var list))
+            if (!TryReadList(bytes, ref index, depth + 1, out var list))
                 return false;
 
             value = list;
@@ -97,9 +99,16 @@ static class PeerWireBencode
         };
     }
 
-    static bool TryReadDictionary(ReadOnlySpan<byte> bytes, ref int index, out Dictionary<string, object> dictionary)
+    static bool TryReadDictionary(
+        ReadOnlySpan<byte> bytes,
+        ref int index,
+        int depth,
+        out Dictionary<string, object> dictionary)
     {
         dictionary = [];
+        if (depth > MaxNestingDepth)
+            return false;
+
         if (index >= bytes.Length || bytes[index++] != (byte)'d')
             return false;
 
@@ -107,7 +116,7 @@ static class PeerWireBencode
         {
             if (!TryReadBytes(bytes, ref index, out var keyBytes))
                 return false;
-            if (!TryReadValue(bytes, ref index, out var value))
+            if (!TryReadValue(bytes, ref index, depth, out var value))
                 return false;
 
             dictionary[Encoding.UTF8.GetString(keyBytes)] = value;
@@ -120,15 +129,22 @@ static class PeerWireBencode
         return true;
     }
 
-    static bool TryReadList(ReadOnlySpan<byte> bytes, ref int index, out List<object> list)
+    static bool TryReadList(
+        ReadOnlySpan<byte> bytes,
+        ref int index,
+        int depth,
+        out List<object> list)
     {
         list = [];
+        if (depth > MaxNestingDepth)
+            return false;
+
         if (index >= bytes.Length || bytes[index++] != (byte)'l')
             return false;
 
         while (index < bytes.Length && bytes[index] != (byte)'e')
         {
-            if (!TryReadValue(bytes, ref index, out var value))
+            if (!TryReadValue(bytes, ref index, depth, out var value))
                 return false;
 
             list.Add(value);
@@ -198,9 +214,12 @@ static class PeerWireBencode
         return true;
     }
 
-    static bool TrySkipValue(ReadOnlySpan<byte> bytes, ref int index)
+    static bool TrySkipValue(ReadOnlySpan<byte> bytes, ref int index, int depth)
     {
         if (index >= bytes.Length)
+            return false;
+
+        if (depth > MaxNestingDepth)
             return false;
 
         switch (bytes[index])
@@ -217,7 +236,7 @@ static class PeerWireBencode
                 index++;
                 while (index < bytes.Length && bytes[index] != (byte)'e')
                 {
-                    if (!TrySkipValue(bytes, ref index))
+                    if (!TrySkipValue(bytes, ref index, depth + 1))
                         return false;
                 }
                 if (index >= bytes.Length)
@@ -230,7 +249,7 @@ static class PeerWireBencode
                 {
                     if (!TryReadBytes(bytes, ref index, out _))
                         return false;
-                    if (!TrySkipValue(bytes, ref index))
+                    if (!TrySkipValue(bytes, ref index, depth + 1))
                         return false;
                 }
                 if (index >= bytes.Length)

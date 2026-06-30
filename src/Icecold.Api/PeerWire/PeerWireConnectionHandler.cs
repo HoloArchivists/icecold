@@ -68,6 +68,10 @@ public sealed class PeerWireConnectionHandler(
         {
             logger.LogDebug(ex, "Peer-wire connection closed for torrent {InfoHash}.", torrent?.InfoHashHex ?? infoHashHex);
         }
+        catch (TimeoutException ex)
+        {
+            logger.LogDebug(ex, "Peer-wire connection timed out for torrent {InfoHash}.", torrent?.InfoHashHex ?? infoHashHex);
+        }
         finally
         {
             await state.DisposeAsync();
@@ -76,19 +80,20 @@ public sealed class PeerWireConnectionHandler(
 
     async Task<PeerWireHandshake?> ReadHandshakeAsync(Stream stream, CancellationToken cancellationToken)
     {
-        var pstrlen = await PeerWireStreamIo.ReadByteAsync(stream, cancellationToken);
+        var timeout = TimeSpan.FromSeconds(options.Value.PeerWire.HandshakeTimeoutSeconds);
+        var pstrlen = await PeerWireStreamIo.ReadByteAsync(stream, timeout, cancellationToken);
         if (pstrlen != PeerWireProtocol.ProtocolName.Length)
             return null;
 
         var protocol = new byte[pstrlen];
-        if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, protocol, cancellationToken))
+        if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, protocol, timeout, cancellationToken))
             return null;
 
         if (!protocol.AsSpan().SequenceEqual(PeerWireProtocol.ProtocolName))
             return null;
 
         var reservedAndHashes = new byte[48];
-        if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, reservedAndHashes, cancellationToken))
+        if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, reservedAndHashes, timeout, cancellationToken))
             return null;
 
         return new PeerWireHandshake(
@@ -104,9 +109,10 @@ public sealed class PeerWireConnectionHandler(
         CancellationToken cancellationToken)
     {
         var lengthPrefix = new byte[4];
+        var idleTimeout = TimeSpan.FromSeconds(options.Value.PeerWire.IdleTimeoutSeconds);
         while (!cancellationToken.IsCancellationRequested)
         {
-            if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, lengthPrefix, cancellationToken))
+            if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, lengthPrefix, idleTimeout, cancellationToken))
             {
                 logger.LogDebug("Peer-wire client closed connection for {InfoHash}.", torrent.InfoHashHex);
                 return;
@@ -127,7 +133,7 @@ public sealed class PeerWireConnectionHandler(
                 return;
             }
 
-            var messageId = await PeerWireStreamIo.ReadByteAsync(stream, cancellationToken);
+            var messageId = await PeerWireStreamIo.ReadByteAsync(stream, idleTimeout, cancellationToken);
             if (messageId < 0)
             {
                 logger.LogDebug("Peer-wire client closed after length prefix for {InfoHash}.", torrent.InfoHashHex);
@@ -139,17 +145,17 @@ public sealed class PeerWireConnectionHandler(
             {
                 case PeerWireMessageId.Interested:
                     logger.LogDebug("Peer-wire interested received for {InfoHash}.", torrent.InfoHashHex);
-                    if (payloadLength > 0 && !await DrainAsync(stream, payloadLength, cancellationToken))
+                    if (payloadLength > 0 && !await DrainAsync(stream, payloadLength, idleTimeout, cancellationToken))
                         return;
                     break;
                 case PeerWireMessageId.NotInterested:
                     logger.LogDebug("Peer-wire not interested received for {InfoHash}.", torrent.InfoHashHex);
-                    if (payloadLength > 0 && !await DrainAsync(stream, payloadLength, cancellationToken))
+                    if (payloadLength > 0 && !await DrainAsync(stream, payloadLength, idleTimeout, cancellationToken))
                         return;
                     break;
                 case PeerWireMessageId.Request when payloadLength == 12:
                     var payload = new byte[12];
-                    if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, payload, cancellationToken))
+                    if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, payload, idleTimeout, cancellationToken))
                         return;
 
                     var pieceIndex = BinaryPrimitives.ReadInt32BigEndian(payload.AsSpan(0, 4));
@@ -189,7 +195,7 @@ public sealed class PeerWireConnectionHandler(
                     return;
                 case PeerWireMessageId.Extended when payloadLength > 0:
                     var extendedPayload = new byte[payloadLength];
-                    if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, extendedPayload, cancellationToken))
+                    if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, extendedPayload, idleTimeout, cancellationToken))
                         return;
 
                     await HandleExtendedMessageAsync(stream, torrent, state, extendedPayload, cancellationToken);
@@ -203,7 +209,7 @@ public sealed class PeerWireConnectionHandler(
                         messageId,
                         torrent.InfoHashHex,
                         payloadLength);
-                    if (payloadLength > 0 && !await DrainAsync(stream, payloadLength, cancellationToken))
+                    if (payloadLength > 0 && !await DrainAsync(stream, payloadLength, idleTimeout, cancellationToken))
                     {
                         logger.LogDebug(
                             "Peer-wire client closed while draining message {MessageId} for {InfoHash}.",
@@ -476,7 +482,11 @@ public sealed class PeerWireConnectionHandler(
             await stream.WriteAsync(payload, cancellationToken);
     }
 
-    static async Task<bool> DrainAsync(Stream stream, int byteCount, CancellationToken cancellationToken)
+    static async Task<bool> DrainAsync(
+        Stream stream,
+        int byteCount,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
     {
         var buffer = ArrayPool<byte>.Shared.Rent(Math.Min(byteCount, 16 * 1024));
         try
@@ -484,11 +494,16 @@ public sealed class PeerWireConnectionHandler(
             var remaining = byteCount;
             while (remaining > 0)
             {
-                var read = await stream.ReadAsync(buffer.AsMemory(0, Math.Min(buffer.Length, remaining)), cancellationToken);
-                if (read == 0)
+                if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(
+                        stream,
+                        buffer.AsMemory(0, Math.Min(buffer.Length, remaining)),
+                        timeout,
+                        cancellationToken))
+                {
                     return false;
+                }
 
-                remaining -= read;
+                remaining -= Math.Min(buffer.Length, remaining);
             }
 
             return true;

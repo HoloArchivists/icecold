@@ -57,6 +57,10 @@ public sealed class PeerWireOptions
     public int MaxOutstandingRequests { get; set; } = 8192;
 
     public int MaxConnections { get; set; } = 128;
+
+    public int HandshakeTimeoutSeconds { get; set; } = 15;
+
+    public int IdleTimeoutSeconds { get; set; } = 120;
 }
 
 public sealed class ContentSourceOptions

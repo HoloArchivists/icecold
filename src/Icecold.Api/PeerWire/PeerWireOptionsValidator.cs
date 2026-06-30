@@ -34,6 +34,12 @@ public sealed class PeerWireOptionsValidator : IValidateOptions<IcecoldOptions>
         if (peerWire.MaxConnections < 1)
             failures.Add("Icecold:PeerWire:MaxConnections must be at least 1.");
 
+        if (peerWire.HandshakeTimeoutSeconds is < 1 or > 300)
+            failures.Add("Icecold:PeerWire:HandshakeTimeoutSeconds must be between 1 and 300.");
+
+        if (peerWire.IdleTimeoutSeconds is < 1 or > 3600)
+            failures.Add("Icecold:PeerWire:IdleTimeoutSeconds must be between 1 and 3600.");
+
         return failures.Count == 0
             ? ValidateOptionsResult.Success
             : ValidateOptionsResult.Fail(failures);

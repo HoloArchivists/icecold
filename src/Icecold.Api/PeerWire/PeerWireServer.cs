@@ -58,6 +58,10 @@ public sealed class PeerWireServer(
                     {
                         logger.LogDebug(ex, "Peer-wire client connection closed.");
                     }
+                    catch (TimeoutException ex)
+                    {
+                        logger.LogDebug(ex, "Peer-wire client connection timed out.");
+                    }
                     finally
                     {
                         connectionSlots.Release();
