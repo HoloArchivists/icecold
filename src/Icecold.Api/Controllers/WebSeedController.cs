@@ -38,6 +38,15 @@ public sealed class WebSeedController(WebSeedService webSeed, IOptions<IcecoldOp
         if (result.Status == WebSeedOpenStatus.Conflict)
             return Problem(result.Error, statusCode: StatusCodes.Status409Conflict);
 
+        if (result.Status == WebSeedOpenStatus.RangeNotSatisfiable)
+        {
+            Response.StatusCode = StatusCodes.Status416RangeNotSatisfiable;
+            Response.Headers[HeaderNames.AcceptRanges] = "bytes";
+            Response.Headers[HeaderNames.ContentRange] = $"bytes */{result.ContentLength}";
+            Response.ContentLength = 0;
+            return new EmptyResult();
+        }
+
         Response.Headers[HeaderNames.AcceptRanges] = "bytes";
         Response.ContentType = "application/octet-stream";
         Response.ContentLength = result.Length;

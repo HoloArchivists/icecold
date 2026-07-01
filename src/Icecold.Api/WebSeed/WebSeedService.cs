@@ -26,14 +26,17 @@ public sealed class WebSeedService(TorrentLocationService locations)
                 return WebSeedOpenResult.NotFound();
             }
 
-            var (offset, length, partial) = ParseRange(rangeHeader, resolved.Metadata.Length);
+            var range = ParseRange(rangeHeader, resolved.Metadata.Length);
+            if (!range.Satisfiable)
+                return WebSeedOpenResult.RangeNotSatisfiable(resolved.Metadata.Length);
+
             try
             {
-                var stream = partial
-                    ? await resolved.Source.OpenRangeAsync(resolved.Metadata.Path, offset, length, cancellationToken)
+                var stream = range.Partial
+                    ? await resolved.Source.OpenRangeAsync(resolved.Metadata.Path, range.Offset, range.Length, cancellationToken)
                     : await resolved.Source.OpenReadAsync(resolved.Metadata.Path, cancellationToken);
 
-                return WebSeedOpenResult.Opened(stream, offset, length, resolved.Metadata.Length, partial);
+                return WebSeedOpenResult.Opened(stream, range.Offset, range.Length, resolved.Metadata.Length, range.Partial);
             }
             catch (Exception ex) when (IsContentAccessFailure(ex))
             {
@@ -43,10 +46,10 @@ public sealed class WebSeedService(TorrentLocationService locations)
         }
     }
 
-    static (long Offset, long Length, bool Partial) ParseRange(string? rangeHeader, long contentLength)
+    static WebSeedRangeSelection ParseRange(string? rangeHeader, long contentLength)
     {
         if (string.IsNullOrWhiteSpace(rangeHeader))
-            return (0, contentLength, false);
+            return new WebSeedRangeSelection(0, contentLength, Partial: false, Satisfiable: true);
 
         if (!RangeHeaderValue.TryParse(rangeHeader, out var parsed) || parsed.Ranges.Count != 1)
             throw new BadHttpRequestException("Only a single valid byte range is supported.");
@@ -62,6 +65,9 @@ public sealed class WebSeedService(TorrentLocationService locations)
         }
         else if (range.To.HasValue)
         {
+            if (range.To.Value <= 0)
+                return WebSeedRangeSelection.NotSatisfiable;
+
             var suffixLength = Math.Min(range.To.Value, contentLength);
             start = contentLength - suffixLength;
             end = contentLength - 1;
@@ -72,10 +78,10 @@ public sealed class WebSeedService(TorrentLocationService locations)
         }
 
         if (start < 0 || start >= contentLength || end < start)
-            throw new BadHttpRequestException("Requested range is not satisfiable.");
+            return WebSeedRangeSelection.NotSatisfiable;
 
         end = Math.Min(end, contentLength - 1);
-        return (start, end - start + 1, true);
+        return new WebSeedRangeSelection(start, end - start + 1, Partial: true, Satisfiable: true);
     }
 
     static bool IsContentAccessFailure(Exception ex)
@@ -99,11 +105,24 @@ public sealed record WebSeedOpenResult(
 
     public static WebSeedOpenResult Conflict(string error)
         => new(WebSeedOpenStatus.Conflict, null, 0, 0, 0, false, error);
+
+    public static WebSeedOpenResult RangeNotSatisfiable(long contentLength)
+        => new(WebSeedOpenStatus.RangeNotSatisfiable, null, 0, 0, contentLength, false, null);
 }
 
 public enum WebSeedOpenStatus
 {
     Opened,
     NotFound,
-    Conflict
+    Conflict,
+    RangeNotSatisfiable
+}
+
+readonly record struct WebSeedRangeSelection(
+    long Offset,
+    long Length,
+    bool Partial,
+    bool Satisfiable)
+{
+    public static WebSeedRangeSelection NotSatisfiable => new(0, 0, Partial: false, Satisfiable: false);
 }

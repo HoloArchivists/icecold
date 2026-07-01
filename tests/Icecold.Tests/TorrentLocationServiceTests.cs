@@ -1,15 +1,19 @@
 using System.Text;
+using Icecold.Api.Controllers;
 using Icecold.Api.Content;
 using Icecold.Api.Data;
 using Icecold.Api.Options;
 using Icecold.Api.Torrents;
 using Icecold.Api.WebSeed;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Microsoft.Net.Http.Headers;
 
 namespace Icecold.Tests;
 
@@ -127,6 +131,59 @@ public sealed class TorrentLocationServiceTests : IDisposable
 
         Assert.Equal(WebSeedOpenStatus.Conflict, result.Status);
         Assert.Equal(TorrentLocationStatus.Missing, (await db.TorrentLocations.SingleAsync()).Status);
+    }
+
+    [Fact]
+    public async Task WebSeed_Returns_Range_Not_Satisfiable_For_Unsatisfiable_Range()
+    {
+        await File.WriteAllTextAsync(Path.Combine(hotRoot, "payload.bin"), "hello");
+
+        var hotSource = new LocalFileContentSource("hot", hotRoot);
+        var hotMetadata = await hotSource.GetMetadataAsync("payload.bin", CancellationToken.None);
+        var torrentResult = await CreateBuilder().BuildSingleFileAsync(hotMetadata, hotSource, null, CancellationToken.None);
+        await using var db = CreateDb(torrentResult, hotMetadata);
+        await using var provider = CreateProvider(db);
+        var webSeed = new WebSeedService(CreateLocationService(provider));
+
+        var result = await webSeed.OpenAsync(torrentResult.InfoHashHex, "bytes=99-100", CancellationToken.None);
+
+        Assert.Equal(WebSeedOpenStatus.RangeNotSatisfiable, result.Status);
+        Assert.Equal(5, result.ContentLength);
+    }
+
+    [Fact]
+    public async Task WebSeed_Controller_Returns_416_With_Content_Range_For_Unsatisfiable_Range()
+    {
+        await File.WriteAllTextAsync(Path.Combine(hotRoot, "payload.bin"), "hello");
+
+        var hotSource = new LocalFileContentSource("hot", hotRoot);
+        var hotMetadata = await hotSource.GetMetadataAsync("payload.bin", CancellationToken.None);
+        var torrentResult = await CreateBuilder().BuildSingleFileAsync(hotMetadata, hotSource, null, CancellationToken.None);
+        await using var db = CreateDb(torrentResult, hotMetadata);
+        await using var provider = CreateProvider(db);
+        var webSeed = new WebSeedService(CreateLocationService(provider));
+        var context = new DefaultHttpContext();
+        context.Request.Headers[HeaderNames.Range] = "bytes=99-100";
+        var controller = new WebSeedController(
+            webSeed,
+            Options.Create(new IcecoldOptions
+            {
+                WebSeed = new WebSeedOptions { Enabled = true }
+            }))
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = context
+            }
+        };
+
+        var result = await controller.Get(torrentResult.InfoHashHex, "payload.bin", CancellationToken.None);
+
+        Assert.IsType<EmptyResult>(result);
+        Assert.Equal(StatusCodes.Status416RangeNotSatisfiable, context.Response.StatusCode);
+        Assert.Equal("bytes", context.Response.Headers[HeaderNames.AcceptRanges].ToString());
+        Assert.Equal("bytes */5", context.Response.Headers[HeaderNames.ContentRange].ToString());
+        Assert.Equal(0, context.Response.ContentLength);
     }
 
     IcecoldDbContext CreateDb(TorrentBuildResult torrentResult, ContentMetadata metadata)
