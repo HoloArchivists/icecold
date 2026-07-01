@@ -49,6 +49,12 @@ public static class TrackerQueryParser
             return false;
         }
 
+        if (uploaded < 0 || downloaded < 0 || left < 0)
+        {
+            failureReason = "uploaded, downloaded, and left must be non-negative";
+            return false;
+        }
+
         var compact = TryGetString(parameters, "compact", out var compactValue) && compactValue == "1";
         var numberWanted = TryGetInt(parameters, "numwant", out var requested) ? requested : 50;
         var eventName = TryGetString(parameters, "event", out var parsedEvent) ? parsedEvent : null;

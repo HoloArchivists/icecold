@@ -33,6 +33,38 @@ public sealed class TrackerTests
         Assert.Equal("started", input.Event);
     }
 
+    [Theory]
+    [InlineData("uploaded")]
+    [InlineData("downloaded")]
+    [InlineData("left")]
+    public void TryParse_Rejects_Negative_Transfer_Counters(string counter)
+    {
+        var infoHash = Enumerable.Range(0, 20).Select(i => (byte)i).ToArray();
+        var peerId = Enumerable.Range(20, 20).Select(i => (byte)i).ToArray();
+        var values = new Dictionary<string, long>(StringComparer.Ordinal)
+        {
+            ["uploaded"] = 0,
+            ["downloaded"] = 0,
+            ["left"] = 0
+        };
+        values[counter] = -1;
+        var context = new DefaultHttpContext();
+        context.Connection.RemoteIpAddress = IPAddress.Parse("127.0.0.1");
+        context.Request.QueryString = new QueryString(
+            "?info_hash=" + PercentEncode(infoHash)
+            + "&peer_id=" + PercentEncode(peerId)
+            + "&port=6881"
+            + "&uploaded=" + values["uploaded"]
+            + "&downloaded=" + values["downloaded"]
+            + "&left=" + values["left"]);
+
+        var parsed = TrackerQueryParser.TryParse(context.Request, out var input, out var failure);
+
+        Assert.False(parsed);
+        Assert.Null(input);
+        Assert.Equal("uploaded, downloaded, and left must be non-negative", failure);
+    }
+
     [Fact]
     public void TryParseScrape_Preserves_Raw_InfoHash_Bytes()
     {
