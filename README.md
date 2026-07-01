@@ -105,6 +105,14 @@ curl -OJ http://localhost:8080/torrents/{infoHash}.torrent
 curl http://localhost:8080/torrents/{infoHash}/magnet
 ```
 
+### Stats
+
+```bash
+curl http://localhost:8080/stats
+```
+
+The stats endpoint is public when `Stats:Enabled` is true and cached briefly by the server. It exposes aggregate public-facing catalog and swarm numbers: ready/seeding torrents, indexed ready bytes, tracker peer counts, and enabled serving transports. Backing-source names, location health, indexing failure counts, and private advertised endpoints are intentionally omitted.
+
 ### Idempotency
 
 Re-submitting the same `{ source, path }` is idempotent after path normalization and metadata lookup:
@@ -158,6 +166,8 @@ Settings live under `Icecold` in `appsettings.json`:
 | `Tracker:MaxPeersReturned` | `200` | Maximum number of peers returned in a single announce response |
 | `Tracker:MaxPeersStoredPerTorrent` | `1000` | Maximum peers retained per infohash before evicting least-recently announced peers |
 | `Tracker:PruneIntervalSeconds` | `300` | Background pruning interval for expired peers and empty infohash buckets |
+| `Stats:Enabled` | `true` | Enable the public `/stats` endpoint |
+| `Stats:CacheSeconds` | `5` | Server-side cache duration for the public `/stats` response. Set to `0` to disable stats caching |
 | `WebSeed:Enabled` | `true` | Enable HTTP webseed serving and advertise `/webseed` URLs in `.torrent` files and magnet links. At least one of `WebSeed:Enabled` or `PeerWire:Enabled` must be true |
 | `WebSeed:PublicBaseUrl` | — | Optional public origin for advertised webseed URLs. Leave empty to use `PublicBaseUrl`; set it for a CDN or separate webseed reverse proxy |
 | `PeerWire:Enabled` | `false` | Enable the upload-only TCP peer-wire seeding listener. At least one of `WebSeed:Enabled` or `PeerWire:Enabled` must be true |

@@ -4,6 +4,7 @@ using Icecold.Api.Data;
 using Icecold.Api.Indexing;
 using Icecold.Api.Options;
 using Icecold.Api.PeerWire;
+using Icecold.Api.Stats;
 using Icecold.Api.Torrents;
 using Icecold.Api.Tracker;
 using Icecold.Api.WebSeed;
@@ -13,6 +14,7 @@ using Microsoft.Extensions.Options;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
+builder.Services.AddMemoryCache();
 builder.Services.AddOpenApi();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
@@ -26,6 +28,7 @@ builder.Services.AddOptions<IcecoldOptions>()
 builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, IndexingOptionsValidator>();
 builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, PeerWireOptionsValidator>();
 builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, ServingOptionsValidator>();
+builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, StatsOptionsValidator>();
 builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, TrackerOptionsValidator>();
 
 builder.Services.AddDbContext<IcecoldDbContext>(options =>
@@ -53,6 +56,7 @@ builder.Services.AddScoped<AdminApiKeyAuthorizationFilter>();
 builder.Services.AddScoped<IndexingClaimService>();
 builder.Services.AddScoped<IndexFileService>();
 builder.Services.AddScoped<TorrentMetadataService>();
+builder.Services.AddScoped<PublicStatsService>();
 builder.Services.AddScoped<TrackerAnnounceService>();
 builder.Services.AddScoped<TrackerScrapeService>();
 builder.Services.AddScoped<WebSeedService>();

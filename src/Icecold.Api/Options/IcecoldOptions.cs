@@ -14,6 +14,8 @@ public sealed class IcecoldOptions
 
     public TrackerOptions Tracker { get; set; } = new();
 
+    public StatsOptions Stats { get; set; } = new();
+
     public WebSeedOptions WebSeed { get; set; } = new();
 
     public PeerWireOptions PeerWire { get; set; } = new();
@@ -46,6 +48,13 @@ public sealed class TrackerOptions
     public int MaxPeersStoredPerTorrent { get; set; } = 1000;
 
     public int PruneIntervalSeconds { get; set; } = 300;
+}
+
+public sealed class StatsOptions
+{
+    public bool Enabled { get; set; } = true;
+
+    public int CacheSeconds { get; set; } = 5;
 }
 
 public sealed class WebSeedOptions

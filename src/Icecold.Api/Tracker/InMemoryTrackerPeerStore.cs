@@ -123,6 +123,30 @@ public sealed class InMemoryTrackerPeerStore(
         return new TrackerPeerPruneResult(removedPeers, removedTorrents);
     }
 
+    public TrackerPeerStoreStats GetStats()
+    {
+        var timeout = TimeSpan.FromSeconds(options.Value.Tracker.PeerTimeoutSeconds);
+        var now = DateTimeOffset.UtcNow;
+
+        lock (gate)
+        {
+            foreach (var (infoHash, peers) in torrents.ToArray())
+            {
+                Expire(peers, now, timeout);
+                if (peers.Count == 0)
+                    torrents.Remove(infoHash);
+            }
+
+            var peerEntries = torrents.Values.SelectMany(p => p.Values).ToList();
+            return new TrackerPeerStoreStats(
+                ActiveInfoHashes: torrents.Count,
+                Peers: peerEntries.Count,
+                Seeders: peerEntries.LongCount(p => p.Left == 0),
+                Leechers: peerEntries.LongCount(p => p.Left > 0),
+                CompletedAnnounces: completedCounts.Values.Sum());
+        }
+    }
+
     static int Expire(Dictionary<string, PeerEntry> peers, DateTimeOffset now, TimeSpan timeout)
     {
         var expired = peers
@@ -166,3 +190,10 @@ public sealed class InMemoryTrackerPeerStore(
 }
 
 public sealed record TrackerPeerPruneResult(int RemovedPeers, int RemovedTorrents);
+
+public sealed record TrackerPeerStoreStats(
+    long ActiveInfoHashes,
+    long Peers,
+    long Seeders,
+    long Leechers,
+    long CompletedAnnounces);
