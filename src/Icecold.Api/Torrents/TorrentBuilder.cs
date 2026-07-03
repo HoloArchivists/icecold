@@ -33,10 +33,12 @@ public sealed class TorrentBuilder(PublicUrlBuilder urls)
 
         var torrent = new Dictionary<string, object>(StringComparer.Ordinal)
         {
-            ["announce"] = urls.TrackerAnnounceUrl,
             ["created by"] = CreatedBy,
             ["info"] = info
         };
+        if (urls.TrackerAnnounceUrls.Count > 0)
+            torrent["announce"] = urls.TrackerAnnounceUrls[0];
+
         if (urls.TrackerAnnounceUrls.Count > 1)
             torrent["announce-list"] = BuildAnnounceList(urls.TrackerAnnounceUrls);
 

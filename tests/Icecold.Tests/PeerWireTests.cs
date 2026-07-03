@@ -141,7 +141,8 @@ public sealed class PeerWireTests : IDisposable
                 Standby = new PeerWireStandbyOptions
                 {
                     Enabled = true,
-                    MinimumExternalSeeders = 1
+                    MinimumExternalSeeders = 1,
+                    MinimumExternalSeederAgeSeconds = 0
                 }
             }
         };
@@ -180,7 +181,8 @@ public sealed class PeerWireTests : IDisposable
                 Standby = new PeerWireStandbyOptions
                 {
                     Enabled = true,
-                    MinimumExternalSeeders = 1
+                    MinimumExternalSeeders = 1,
+                    MinimumExternalSeederAgeSeconds = 0
                 }
             }
         };

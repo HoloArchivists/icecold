@@ -12,7 +12,10 @@ public sealed record TrackerAnnounceInput(
     long Left,
     string? Event,
     bool Compact,
-    int NumberWanted);
+    int NumberWanted)
+{
+    public IPAddress SourceIpAddress { get; init; } = IpAddress;
+}
 
 public sealed record PeerSnapshot(
     byte[] PeerId,
@@ -29,7 +32,7 @@ public sealed record TrackerAnnounceResult(
 
 public sealed record TrackerScrapeStats(int Complete, int Incomplete, long Downloaded);
 
-public sealed record TrackerSwarmStats(int Seeders, int Leechers);
+public sealed record TrackerSwarmStats(int Seeders, int Leechers, int StandbyEligibleSeeders = 0);
 
 public sealed record TrackerScrapeEntry(byte[] InfoHash, TrackerScrapeStats Stats);
 

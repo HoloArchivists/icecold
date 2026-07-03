@@ -8,5 +8,6 @@ data/files/
 src/Icecold.Api/data/files/
 .env
 .env.*
+appsettings.Development.json
 *.user
 *.suo

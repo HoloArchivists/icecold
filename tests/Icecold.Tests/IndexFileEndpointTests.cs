@@ -121,6 +121,7 @@ public sealed class IndexFileEndpointTests : IDisposable
                     ["Icecold:ContentSources:0:Name"] = "local",
                     ["Icecold:ContentSources:0:Type"] = "local",
                     ["Icecold:ContentSources:0:RootPath"] = root,
+                    ["Icecold:AdminApiKey"] = "dev-admin-key",
                     ["Icecold:PeerWire:Enabled"] = "false"
                 });
             });

@@ -12,6 +12,8 @@ public sealed class IcecoldOptions
 
     public IndexingOptions Indexing { get; set; } = new();
 
+    public ReverseProxyOptions ReverseProxy { get; set; } = new();
+
     public TrackerOptions Tracker { get; set; } = new();
 
     public StatsOptions Stats { get; set; } = new();
@@ -35,8 +37,23 @@ public sealed class IndexingOptions
     public int QueueCapacity { get; set; } = 10000;
 }
 
+public sealed class ReverseProxyOptions
+{
+    public bool Enabled { get; set; }
+
+    public List<string> KnownProxies { get; set; } = [];
+
+    public List<string> KnownNetworks { get; set; } = [];
+
+    public int ForwardLimit { get; set; } = 1;
+}
+
 public sealed class TrackerOptions
 {
+    public bool Enabled { get; set; } = true;
+
+    public bool TrackPublicPeers { get; set; } = true;
+
     public int AnnounceIntervalSeconds { get; set; } = 1800;
 
     public int MinAnnounceIntervalSeconds { get; set; } = 300;
@@ -50,6 +67,10 @@ public sealed class TrackerOptions
     public int PruneIntervalSeconds { get; set; } = 300;
 
     public List<string> AdditionalAnnounceUrls { get; set; } = [];
+
+    public List<string> TrustedIpParameterSources { get; set; } = [];
+
+    public int MaxAnnouncesPerSourceIpPerMinute { get; set; } = 120;
 }
 
 public sealed class StatsOptions
@@ -106,7 +127,9 @@ public sealed class PeerWireStandbyOptions
 {
     public bool Enabled { get; set; }
 
-    public int MinimumExternalSeeders { get; set; } = 1;
+    public int MinimumExternalSeeders { get; set; } = 2;
+
+    public int MinimumExternalSeederAgeSeconds { get; set; } = 300;
 }
 
 public sealed class ContentSourceOptions

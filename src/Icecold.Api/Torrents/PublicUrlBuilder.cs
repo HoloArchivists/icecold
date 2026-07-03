@@ -14,14 +14,22 @@ public sealed class PublicUrlBuilder(IOptions<IcecoldOptions> options)
 
     public bool WebSeedEnabled => icecold.WebSeed.Enabled;
 
+    public bool TrackerEnabled => icecold.Tracker.Enabled;
+
     public string TrackerAnnounceUrl => $"{publicBaseUrl}/announce";
 
     public IReadOnlyList<string> TrackerAnnounceUrls
-        => [.. new[] { TrackerAnnounceUrl }
+        => [.. OwnTrackerAnnounceUrls()
             .Concat(icecold.Tracker.AdditionalAnnounceUrls)
             .Where(url => !string.IsNullOrWhiteSpace(url))
             .Select(url => url.Trim())
             .Distinct(StringComparer.Ordinal)];
+
+    IEnumerable<string> OwnTrackerAnnounceUrls()
+    {
+        if (TrackerEnabled)
+            yield return TrackerAnnounceUrl;
+    }
 
     public string BuildWebSeedUrl(string infoHashHex, string displayName)
         => $"{webSeedPublicBaseUrl}/webseed/{infoHashHex}/{Uri.EscapeDataString(displayName)}";

@@ -1,3 +1,4 @@
+using System.Net;
 using Icecold.Api.Options;
 using Icecold.Api.PeerWire;
 using Icecold.Api.Torrents;
@@ -12,50 +13,75 @@ public sealed class InMemoryTrackerPeerStore(
     readonly object gate = new();
     readonly Dictionary<string, Dictionary<string, PeerEntry>> torrents = new(StringComparer.Ordinal);
     readonly Dictionary<string, long> completedCounts = new(StringComparer.Ordinal);
+    readonly Dictionary<string, Queue<DateTimeOffset>> announceRateLimits = new(StringComparer.Ordinal);
 
     public TrackerAnnounceResult Announce(TrackerAnnounceInput input)
     {
         var trackerOptions = options.Value.Tracker;
+        var standbyOptions = options.Value.PeerWire.Standby;
         var now = DateTimeOffset.UtcNow;
         var timeout = TimeSpan.FromSeconds(trackerOptions.PeerTimeoutSeconds);
         var interval = TimeSpan.FromSeconds(trackerOptions.AnnounceIntervalSeconds);
         var minInterval = TimeSpan.FromSeconds(trackerOptions.MinAnnounceIntervalSeconds);
         var maxPeers = Math.Clamp(input.NumberWanted, 0, trackerOptions.MaxPeersReturned);
         var peerKey = BuildPeerKey(input);
+        var isStopped = string.Equals(input.Event, "stopped", StringComparison.OrdinalIgnoreCase);
+
+        if (!trackerOptions.TrackPublicPeers)
+            return AnnounceWithoutPublicPeers(maxPeers, interval, minInterval);
 
         lock (gate)
         {
-            if (!torrents.TryGetValue(input.InfoHashHex, out var peers))
+            if (torrents.TryGetValue(input.InfoHashHex, out var peers))
             {
-                peers = new Dictionary<string, PeerEntry>(StringComparer.Ordinal);
-                torrents[input.InfoHashHex] = peers;
+                Expire(peers, now, timeout);
+                if (peers.Count == 0)
+                {
+                    torrents.Remove(input.InfoHashHex);
+                    peers = null;
+                }
             }
 
-            Expire(peers, now, timeout);
-
-            var hadIncompletePeer = peers.TryGetValue(peerKey, out var previous) && previous.Left > 0;
-            if (string.Equals(input.Event, "stopped", StringComparison.OrdinalIgnoreCase))
+            var rateLimited = !isStopped && IsRateLimited(input.SourceIpAddress, now, trackerOptions.MaxAnnouncesPerSourceIpPerMinute);
+            if (isStopped)
             {
-                peers.Remove(peerKey);
+                peers?.Remove(peerKey);
             }
-            else
+            else if (!rateLimited)
             {
-                if (string.Equals(input.Event, "completed", StringComparison.OrdinalIgnoreCase) && (!peers.ContainsKey(peerKey) || hadIncompletePeer))
+                if (peers is null)
+                {
+                    peers = new Dictionary<string, PeerEntry>(StringComparer.Ordinal);
+                    torrents[input.InfoHashHex] = peers;
+                }
+
+                var hasPreviousPeer = peers.TryGetValue(peerKey, out var previous);
+                var previousPeer = hasPreviousPeer ? previous : null;
+                var hadIncompletePeer = previousPeer is { Left: > 0 };
+                if (string.Equals(input.Event, "completed", StringComparison.OrdinalIgnoreCase) && (!hasPreviousPeer || hadIncompletePeer))
                     completedCounts[input.InfoHashHex] = completedCounts.GetValueOrDefault(input.InfoHashHex) + 1;
+
+                var firstSeenCompleteAt = input.Left == 0
+                    ? previousPeer is { Left: 0, FirstSeenCompleteAt: { } previousFirstSeenCompleteAt } ? previousFirstSeenCompleteAt : now
+                    : (DateTimeOffset?)null;
 
                 peers[peerKey] = new PeerEntry(
                     input.PeerId,
-                    input.IpAddress,
+                    Normalize(input.IpAddress),
+                    Normalize(input.SourceIpAddress),
                     input.Port,
                     input.Uploaded,
                     input.Downloaded,
                     input.Left,
+                    firstSeenCompleteAt,
                     now);
+
+                EvictOverLimit(peers, trackerOptions.MaxPeersStoredPerTorrent);
             }
 
-            EvictOverLimit(peers, trackerOptions.MaxPeersStoredPerTorrent);
+            peers ??= [];
 
-            var externalSwarm = GetSwarmStats(peers);
+            var externalSwarm = GetSwarmStats(peers, now, standbyOptions);
             var hasAdvertisedPeer = advertisedPeerProvider.TryGetPeer(externalSwarm, out var advertisedPeer);
             var complete = externalSwarm.Seeders + (hasAdvertisedPeer ? 1 : 0);
             var selected = new List<PeerSnapshot>(Math.Min(maxPeers, peers.Count + 1));
@@ -78,8 +104,12 @@ public sealed class InMemoryTrackerPeerStore(
     public TrackerScrapeStats Scrape(string infoHashHex)
     {
         var trackerOptions = options.Value.Tracker;
+        var standbyOptions = options.Value.PeerWire.Standby;
         var now = DateTimeOffset.UtcNow;
         var timeout = TimeSpan.FromSeconds(trackerOptions.PeerTimeoutSeconds);
+
+        if (!trackerOptions.TrackPublicPeers)
+            return ScrapeWithoutPublicPeers();
 
         lock (gate)
         {
@@ -92,7 +122,7 @@ public sealed class InMemoryTrackerPeerStore(
                     torrents.Remove(infoHashHex);
             }
 
-            var externalSwarm = GetSwarmStats(peers);
+            var externalSwarm = GetSwarmStats(peers, now, standbyOptions);
             var hasAdvertisedPeer = advertisedPeerProvider.TryGetPeer(externalSwarm, out _);
             var complete = externalSwarm.Seeders + (hasAdvertisedPeer ? 1 : 0);
             return new TrackerScrapeStats(complete, externalSwarm.Leechers, completedCounts.GetValueOrDefault(infoHashHex));
@@ -101,22 +131,27 @@ public sealed class InMemoryTrackerPeerStore(
 
     public TrackerSwarmStats GetSwarmStats(string infoHashHex)
     {
-        var timeout = TimeSpan.FromSeconds(options.Value.Tracker.PeerTimeoutSeconds);
+        var trackerOptions = options.Value.Tracker;
+        var standbyOptions = options.Value.PeerWire.Standby;
+        var timeout = TimeSpan.FromSeconds(trackerOptions.PeerTimeoutSeconds);
         var now = DateTimeOffset.UtcNow;
+
+        if (!trackerOptions.TrackPublicPeers)
+            return new TrackerSwarmStats(0, 0, 0);
 
         lock (gate)
         {
             if (!torrents.TryGetValue(infoHashHex, out var peers))
-                return new TrackerSwarmStats(0, 0);
+                return new TrackerSwarmStats(0, 0, 0);
 
             Expire(peers, now, timeout);
             if (peers.Count == 0)
             {
                 torrents.Remove(infoHashHex);
-                return new TrackerSwarmStats(0, 0);
+                return new TrackerSwarmStats(0, 0, 0);
             }
 
-            return GetSwarmStats(peers);
+            return GetSwarmStats(peers, now, standbyOptions);
         }
     }
 
@@ -128,6 +163,8 @@ public sealed class InMemoryTrackerPeerStore(
 
         lock (gate)
         {
+            PruneAnnounceRateLimits(now);
+
             foreach (var (infoHash, peers) in torrents.ToArray())
             {
                 removedPeers += Expire(peers, now, timeout);
@@ -144,8 +181,12 @@ public sealed class InMemoryTrackerPeerStore(
 
     public TrackerPeerStoreStats GetStats()
     {
-        var timeout = TimeSpan.FromSeconds(options.Value.Tracker.PeerTimeoutSeconds);
+        var trackerOptions = options.Value.Tracker;
+        var timeout = TimeSpan.FromSeconds(trackerOptions.PeerTimeoutSeconds);
         var now = DateTimeOffset.UtcNow;
+
+        if (!trackerOptions.TrackPublicPeers)
+            return new TrackerPeerStoreStats(0, 0, 0, 0, 0);
 
         lock (gate)
         {
@@ -179,6 +220,21 @@ public sealed class InMemoryTrackerPeerStore(
         return expired.Length;
     }
 
+    TrackerAnnounceResult AnnounceWithoutPublicPeers(int maxPeers, TimeSpan interval, TimeSpan minInterval)
+    {
+        var externalSwarm = new TrackerSwarmStats(0, 0, 0);
+        var hasAdvertisedPeer = advertisedPeerProvider.TryGetPeer(externalSwarm, out var advertisedPeer);
+        IReadOnlyList<PeerSnapshot> peers = hasAdvertisedPeer && maxPeers > 0 ? [advertisedPeer] : [];
+        return new TrackerAnnounceResult(peers, hasAdvertisedPeer ? 1 : 0, 0, interval, minInterval);
+    }
+
+    TrackerScrapeStats ScrapeWithoutPublicPeers()
+    {
+        var externalSwarm = new TrackerSwarmStats(0, 0, 0);
+        var hasAdvertisedPeer = advertisedPeerProvider.TryGetPeer(externalSwarm, out _);
+        return new TrackerScrapeStats(hasAdvertisedPeer ? 1 : 0, 0, 0);
+    }
+
     static void EvictOverLimit(Dictionary<string, PeerEntry> peers, int maxPeers)
     {
         if (peers.Count <= maxPeers)
@@ -195,22 +251,76 @@ public sealed class InMemoryTrackerPeerStore(
         }
     }
 
-    static TrackerSwarmStats GetSwarmStats(Dictionary<string, PeerEntry> peers)
+    bool IsRateLimited(IPAddress sourceIpAddress, DateTimeOffset now, int maxAnnouncesPerMinute)
+    {
+        if (maxAnnouncesPerMinute <= 0)
+            return false;
+
+        var key = Normalize(sourceIpAddress).ToString();
+        if (!announceRateLimits.TryGetValue(key, out var timestamps))
+        {
+            timestamps = new Queue<DateTimeOffset>();
+            announceRateLimits[key] = timestamps;
+        }
+
+        PruneAnnounceTimestamps(timestamps, now);
+        if (timestamps.Count >= maxAnnouncesPerMinute)
+            return true;
+
+        timestamps.Enqueue(now);
+        return false;
+    }
+
+    void PruneAnnounceRateLimits(DateTimeOffset now)
+    {
+        foreach (var (key, timestamps) in announceRateLimits.ToArray())
+        {
+            PruneAnnounceTimestamps(timestamps, now);
+            if (timestamps.Count == 0)
+                announceRateLimits.Remove(key);
+        }
+    }
+
+    static void PruneAnnounceTimestamps(Queue<DateTimeOffset> timestamps, DateTimeOffset now)
+    {
+        var cutoff = now.AddMinutes(-1);
+        while (timestamps.Count > 0 && timestamps.Peek() <= cutoff)
+            timestamps.Dequeue();
+    }
+
+    static TrackerSwarmStats GetSwarmStats(
+        Dictionary<string, PeerEntry> peers,
+        DateTimeOffset now,
+        PeerWireStandbyOptions standbyOptions)
     {
         var seeders = peers.Values.Count(p => p.Left == 0);
-        return new TrackerSwarmStats(seeders, peers.Count - seeders);
+        var minimumCompleteAge = TimeSpan.FromSeconds(standbyOptions.MinimumExternalSeederAgeSeconds);
+        var standbyEligibleSeeders = peers.Values
+            .Where(p => p.Left == 0
+                && p.FirstSeenCompleteAt is { } firstSeenCompleteAt
+                && now - firstSeenCompleteAt >= minimumCompleteAge)
+            .Select(p => Normalize(p.SourceIpAddress).ToString())
+            .Distinct(StringComparer.Ordinal)
+            .Count();
+
+        return new TrackerSwarmStats(seeders, peers.Count - seeders, standbyEligibleSeeders);
     }
 
     static string BuildPeerKey(TrackerAnnounceInput input)
-        => $"{InfoHashUtil.ToHex(input.PeerId)}@{input.IpAddress}:{input.Port}";
+        => $"{InfoHashUtil.ToHex(input.PeerId)}@{Normalize(input.IpAddress)}:{input.Port}";
+
+    static IPAddress Normalize(IPAddress address)
+        => address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
 
     sealed record PeerEntry(
         byte[] PeerId,
-        System.Net.IPAddress IpAddress,
+        IPAddress IpAddress,
+        IPAddress SourceIpAddress,
         int Port,
         long Uploaded,
         long Downloaded,
         long Left,
+        DateTimeOffset? FirstSeenCompleteAt,
         DateTimeOffset LastAnnouncedAt);
 }
 

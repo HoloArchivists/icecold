@@ -9,7 +9,7 @@ The intended niche is sparse downloads from very large collections: archives, da
 Icecold is for you if:
 
 - You want to publish many individual files as torrents without manually managing millions of `.torrent` files
-- You want one service that indexes content, stores torrent metadata, runs the tracker, and seeds the initial bytes
+- You want one service that indexes content, stores torrent metadata, can run the tracker, and seeds the initial bytes
 - You control the tracker URL and want clients for the same archive to find each other through your service
 - Most content is cold, but any file may need to become available on demand
 - You want the archive backing store to remain the source of truth while peer swarms opportunistically absorb download traffic
@@ -36,7 +36,7 @@ Icecold may not fit if:
 - Indexes files from a configured archive or content directory
 - Generates one BitTorrent torrent per indexed file
 - Serves `.torrent` files and magnet links for ready content
-- Runs a built-in tracker so clients can discover each other
+- Runs an optional built-in tracker so clients can discover each other
 - Seeds file bytes from the backing store via configurable HTTP WebSeed and/or TCP peer-wire, with optional MSE/RC4 encryption
 - Tracks multiple verified backing locations per torrent, with failover from hot to cold paths as files are moved
 - Runs as a local ASP.NET Core app or a Docker image
@@ -45,6 +45,7 @@ Icecold may not fit if:
 
 - Single-file indexing is implemented. Folder indexing returns `501 Not Implemented`.
 - Peer-wire is upload-only TCP, including `ut_metadata` for magnet clients and MSE/RC4 encryption. Icecold does not download from peers, initiate outbound connections, or support uTP.
+- If the built-in tracker is disabled, WebSeed is required for Icecold-origin serving. Icecold peer-wire will not be discoverable because Icecold does not announce itself through DHT, PEX, or external trackers.
 - The tracker peer store is in-memory and single-instance.
 - Local filesystem content sources are implemented. S3 and HTTP backends would fit the existing `IContentSource` interface but are not built yet.
 - Public multi-tenant hardening is out of scope.
@@ -178,6 +179,9 @@ Icecold__ContentSources__0__RootPath=/data/files
 Icecold:Tracker:AdditionalAnnounceUrls:0
 Icecold__Tracker__AdditionalAnnounceUrls__0=udp://tracker.example.net:6969/announce
 
+Icecold:ReverseProxy:KnownNetworks:0
+Icecold__ReverseProxy__KnownNetworks__0=172.20.0.0/16
+
 ConnectionStrings:Icecold
 ConnectionStrings__Icecold=Host=postgres;Port=5432;Database=icecold;Username=icecold;Password=...
 ```
@@ -191,6 +195,9 @@ services:
     environment:
       Icecold__WebSeed__Enabled: "true"
       Icecold__WebSeed__PublicBaseUrl: "https://cdn.example.org"
+      Icecold__ReverseProxy__Enabled: "true"
+      Icecold__ReverseProxy__KnownNetworks__0: "172.20.0.0/16"
+      Icecold__Tracker__Enabled: "true"
       Icecold__Tracker__AdditionalAnnounceUrls__0: "udp://tracker.example.net:6969/announce"
       Icecold__Tracker__AdditionalAnnounceUrls__1: "https://backup.example.test/announce"
       Icecold__PeerWire__Enabled: "true"
@@ -210,9 +217,13 @@ docker compose -f compose.prod.yaml -f compose.prod.override.yaml up -d
 
 If peer-wire is enabled, `Icecold:PeerWire:AdvertisedIp` must be an IP address, not a hostname. BitTorrent compact peer responses cannot carry DNS names.
 
-Additional tracker URLs are appended after Icecold's own `/announce` URL in generated `.torrent` files and magnet links.
+If Icecold is behind an HTTP reverse proxy, enable `Icecold:ReverseProxy:Enabled` and configure `KnownProxies` or `KnownNetworks` with the proxy connection source IPs. Icecold only trusts `X-Forwarded-For` and `X-Forwarded-Proto` from those sources. Configure the proxy or Docker network range, not public client ranges.
+
+Additional tracker URLs are appended after Icecold's own `/announce` URL in generated `.torrent` files and magnet links while `Icecold:Tracker:Enabled` is true. If the built-in tracker is disabled, Icecold's `/announce` URL is omitted and only `Icecold:Tracker:AdditionalAnnounceUrls` are emitted.
 
 Startup validation requires at least one enabled serving transport: `Icecold:WebSeed:Enabled` or `Icecold:PeerWire:Enabled`.
+
+When `Icecold:Tracker:Enabled` is false, startup validation also requires `Icecold:WebSeed:Enabled=true`. Peer-wire can still listen, but clients will not discover Icecold as a peer through generated torrent metadata because Icecold does not use DHT, PEX, or announce itself to external trackers.
 
 Super-seeding is intended for torrents with multiple leechers. With only one leecher, Icecold still makes progress by revealing the next piece after the current advertised piece has been fully uploaded, but throughput can be lower than normal peer-wire mode because the client only sees a small piece window. Threshold-based super-seeding only affects new peer-wire connections; a client that already received the full bitfield stays in normal mode until it reconnects.
 

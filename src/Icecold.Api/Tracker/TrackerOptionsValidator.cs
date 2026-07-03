@@ -28,6 +28,9 @@ public sealed class TrackerOptionsValidator : IValidateOptions<IcecoldOptions>
         if (tracker.PruneIntervalSeconds < 1)
             failures.Add("Icecold:Tracker:PruneIntervalSeconds must be at least 1.");
 
+        if (tracker.MaxAnnouncesPerSourceIpPerMinute < 0)
+            failures.Add("Icecold:Tracker:MaxAnnouncesPerSourceIpPerMinute must be at least 0.");
+
         foreach (var url in tracker.AdditionalAnnounceUrls)
         {
             if (string.IsNullOrWhiteSpace(url))
@@ -41,6 +44,18 @@ public sealed class TrackerOptionsValidator : IValidateOptions<IcecoldOptions>
             {
                 failures.Add("Icecold:Tracker:AdditionalAnnounceUrls entries must be absolute http, https, or udp tracker URLs.");
             }
+        }
+
+        foreach (var trustedSource in tracker.TrustedIpParameterSources)
+        {
+            if (string.IsNullOrWhiteSpace(trustedSource))
+            {
+                failures.Add("Icecold:Tracker:TrustedIpParameterSources entries must not be blank.");
+                continue;
+            }
+
+            if (!IpNetworkRange.TryParse(trustedSource, out _))
+                failures.Add("Icecold:Tracker:TrustedIpParameterSources entries must be IP addresses or CIDR ranges.");
         }
 
         return failures.Count == 0

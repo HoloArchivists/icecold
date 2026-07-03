@@ -1,13 +1,18 @@
 using System.Globalization;
 using System.Net;
 using System.Text;
+using Icecold.Api.Options;
 using Icecold.Api.Torrents;
 
 namespace Icecold.Api.Tracker;
 
 public static class TrackerQueryParser
 {
-    public static bool TryParse(HttpRequest request, out TrackerAnnounceInput? input, out string failureReason)
+    public static bool TryParse(
+        HttpRequest request,
+        TrackerOptions trackerOptions,
+        out TrackerAnnounceInput? input,
+        out string failureReason)
     {
         input = null;
         failureReason = "";
@@ -58,7 +63,7 @@ public static class TrackerQueryParser
         var compact = TryGetString(parameters, "compact", out var compactValue) && compactValue == "1";
         var numberWanted = TryGetInt(parameters, "numwant", out var requested) ? requested : 50;
         var eventName = TryGetString(parameters, "event", out var parsedEvent) ? parsedEvent : null;
-        var ipAddress = ResolveIpAddress(request, parameters);
+        var (ipAddress, sourceIpAddress) = ResolveIpAddress(request, parameters, trackerOptions);
 
         input = new TrackerAnnounceInput(
             InfoHashUtil.ToHex(infoHash),
@@ -70,7 +75,10 @@ public static class TrackerQueryParser
             left,
             eventName,
             compact,
-            numberWanted);
+            numberWanted)
+        {
+            SourceIpAddress = sourceIpAddress
+        };
 
         return true;
     }
@@ -107,13 +115,35 @@ public static class TrackerQueryParser
         return true;
     }
 
-    static IPAddress ResolveIpAddress(HttpRequest request, Dictionary<string, List<byte[]>> parameters)
+    static (IPAddress PeerIpAddress, IPAddress SourceIpAddress) ResolveIpAddress(
+        HttpRequest request,
+        Dictionary<string, List<byte[]>> parameters,
+        TrackerOptions trackerOptions)
     {
-        if (TryGetString(parameters, "ip", out var ipText) && IPAddress.TryParse(ipText, out var provided))
-            return provided;
+        var sourceIpAddress = Normalize(request.HttpContext.Connection.RemoteIpAddress ?? IPAddress.Loopback);
+        if (TryGetString(parameters, "ip", out var ipText)
+            && IPAddress.TryParse(ipText, out var provided)
+            && IsTrustedIpParameterSource(sourceIpAddress, trackerOptions.TrustedIpParameterSources))
+        {
+            return (Normalize(provided), sourceIpAddress);
+        }
 
-        return request.HttpContext.Connection.RemoteIpAddress ?? IPAddress.Loopback;
+        return (sourceIpAddress, sourceIpAddress);
     }
+
+    static bool IsTrustedIpParameterSource(IPAddress sourceIpAddress, IEnumerable<string> trustedSources)
+    {
+        foreach (var trustedSource in trustedSources)
+        {
+            if (IpNetworkRange.TryParse(trustedSource, out var network) && network.Contains(sourceIpAddress))
+                return true;
+        }
+
+        return false;
+    }
+
+    static IPAddress Normalize(IPAddress address)
+        => IpNetworkRange.Normalize(address);
 
     static Dictionary<string, List<byte[]>> ParseRawQuery(string rawQuery)
     {

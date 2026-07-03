@@ -13,6 +13,6 @@ public sealed class PeerWireStandbyPolicy(IOptions<IcecoldOptions> options)
             return false;
 
         var standby = peerWire.Standby;
-        return !standby.Enabled || externalSwarm.Seeders < standby.MinimumExternalSeeders;
+        return !standby.Enabled || externalSwarm.StandbyEligibleSeeders < standby.MinimumExternalSeeders;
     }
 }

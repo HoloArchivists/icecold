@@ -8,6 +8,7 @@ using Icecold.Api.Stats;
 using Icecold.Api.Torrents;
 using Icecold.Api.Tracker;
 using Icecold.Api.WebSeed;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
@@ -27,9 +28,11 @@ builder.Services.AddOptions<IcecoldOptions>()
     .ValidateOnStart();
 builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, IndexingOptionsValidator>();
 builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, PeerWireOptionsValidator>();
+builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, ReverseProxyOptionsValidator>();
 builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, ServingOptionsValidator>();
 builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, StatsOptionsValidator>();
 builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, TrackerOptionsValidator>();
+builder.Services.AddSingleton<IConfigureOptions<ForwardedHeadersOptions>, ReverseProxyForwardedHeadersOptionsSetup>();
 
 builder.Services.AddDbContext<IcecoldDbContext>(options =>
 {
@@ -69,6 +72,10 @@ builder.Services.AddHostedService<TrackerPeerPruningService>();
 
 var app = builder.Build();
 
+var icecoldOptions = app.Services.GetRequiredService<IOptions<IcecoldOptions>>().Value;
+if (icecoldOptions.ReverseProxy.Enabled)
+    app.UseForwardedHeaders();
+
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
@@ -81,7 +88,6 @@ if (app.Environment.IsDevelopment())
     });
 }
 
-var icecoldOptions = app.Services.GetRequiredService<IOptions<IcecoldOptions>>().Value;
 if (icecoldOptions.Database.AutoMigrate)
 {
     await using var scope = app.Services.CreateAsyncScope();

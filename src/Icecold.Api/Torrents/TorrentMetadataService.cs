@@ -35,7 +35,11 @@ public sealed class TorrentMetadataService(IcecoldDbContext db, PublicUrlBuilder
         var announceListKey = new BEncodedString("announce-list");
         var webSeedKey = new BEncodedString("url-list");
 
-        decoded[announceKey] = new BEncodedString(urls.TrackerAnnounceUrl);
+        if (urls.TrackerAnnounceUrls.Count > 0)
+            decoded[announceKey] = new BEncodedString(urls.TrackerAnnounceUrls[0]);
+        else
+            decoded.Remove(announceKey);
+
         if (urls.TrackerAnnounceUrls.Count > 1)
             decoded[announceListKey] = BuildAnnounceList(urls.TrackerAnnounceUrls);
         else

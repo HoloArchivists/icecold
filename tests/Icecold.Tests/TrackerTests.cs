@@ -1,9 +1,11 @@
 using System.Net;
+using Icecold.Api.Controllers;
 using Icecold.Api.Data;
 using Icecold.Api.Options;
 using Icecold.Api.PeerWire;
 using Icecold.Api.Tracker;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
@@ -23,7 +25,7 @@ public sealed class TrackerTests
             + "&peer_id=" + PercentEncode(peerId)
             + "&port=6881&uploaded=1&downloaded=2&left=3&compact=1&numwant=25&event=started");
 
-        var parsed = TrackerQueryParser.TryParse(context.Request, out var input, out var failure);
+        var parsed = TrackerQueryParser.TryParse(context.Request, new TrackerOptions(), out var input, out var failure);
 
         Assert.True(parsed, failure);
         Assert.NotNull(input);
@@ -31,6 +33,50 @@ public sealed class TrackerTests
         Assert.True(input.Compact);
         Assert.Equal(25, input.NumberWanted);
         Assert.Equal("started", input.Event);
+    }
+
+    [Fact]
+    public void TryParse_Ignores_Announce_Ip_Parameter_By_Default()
+    {
+        var infoHash = Enumerable.Range(0, 20).Select(i => (byte)i).ToArray();
+        var peerId = Enumerable.Range(20, 20).Select(i => (byte)i).ToArray();
+        var context = new DefaultHttpContext();
+        context.Connection.RemoteIpAddress = IPAddress.Parse("127.0.0.1");
+        context.Request.QueryString = new QueryString(
+            "?info_hash=" + PercentEncode(infoHash)
+            + "&peer_id=" + PercentEncode(peerId)
+            + "&port=6881&uploaded=0&downloaded=0&left=0&ip=198.51.100.25");
+
+        var parsed = TrackerQueryParser.TryParse(context.Request, new TrackerOptions(), out var input, out var failure);
+
+        Assert.True(parsed, failure);
+        Assert.NotNull(input);
+        Assert.Equal(IPAddress.Parse("127.0.0.1"), input.IpAddress);
+        Assert.Equal(IPAddress.Parse("127.0.0.1"), input.SourceIpAddress);
+    }
+
+    [Fact]
+    public void TryParse_Honors_Announce_Ip_Parameter_From_Trusted_Source()
+    {
+        var infoHash = Enumerable.Range(0, 20).Select(i => (byte)i).ToArray();
+        var peerId = Enumerable.Range(20, 20).Select(i => (byte)i).ToArray();
+        var context = new DefaultHttpContext();
+        context.Connection.RemoteIpAddress = IPAddress.Parse("127.0.0.1");
+        context.Request.QueryString = new QueryString(
+            "?info_hash=" + PercentEncode(infoHash)
+            + "&peer_id=" + PercentEncode(peerId)
+            + "&port=6881&uploaded=0&downloaded=0&left=0&ip=198.51.100.25");
+        var options = new TrackerOptions
+        {
+            TrustedIpParameterSources = ["127.0.0.0/24"]
+        };
+
+        var parsed = TrackerQueryParser.TryParse(context.Request, options, out var input, out var failure);
+
+        Assert.True(parsed, failure);
+        Assert.NotNull(input);
+        Assert.Equal(IPAddress.Parse("198.51.100.25"), input.IpAddress);
+        Assert.Equal(IPAddress.Parse("127.0.0.1"), input.SourceIpAddress);
     }
 
     [Theory]
@@ -58,7 +104,7 @@ public sealed class TrackerTests
             + "&downloaded=" + values["downloaded"]
             + "&left=" + values["left"]);
 
-        var parsed = TrackerQueryParser.TryParse(context.Request, out var input, out var failure);
+        var parsed = TrackerQueryParser.TryParse(context.Request, new TrackerOptions(), out var input, out var failure);
 
         Assert.False(parsed);
         Assert.Null(input);
@@ -158,6 +204,30 @@ public sealed class TrackerTests
     }
 
     [Fact]
+    public void Announce_RateLimits_Source_Ip_State_Updates()
+    {
+        var store = CreateStore(new IcecoldOptions
+        {
+            Tracker = new TrackerOptions
+            {
+                MaxAnnouncesPerSourceIpPerMinute = 1
+            }
+        });
+        var infoHash = new string('a', 40);
+        var firstPeer = Enumerable.Repeat((byte)1, 20).ToArray();
+        var secondPeer = Enumerable.Repeat((byte)2, 20).ToArray();
+
+        _ = store.Announce(CreateAnnounce(infoHash, firstPeer, "127.0.0.1", 6881, left: 0));
+        var result = store.Announce(CreateAnnounce(infoHash, secondPeer, "127.0.0.1", 6882, left: 0));
+
+        var peer = Assert.Single(result.Peers);
+        Assert.Equal(firstPeer, peer.PeerId);
+        Assert.Equal(1, result.Complete);
+        Assert.Equal(0, result.Incomplete);
+        Assert.Equal(1, store.Scrape(infoHash).Complete);
+    }
+
+    [Fact]
     public void Announce_Evicts_Least_Recently_Seen_Peers_Over_Per_Torrent_Limit()
     {
         var store = CreateStore(new IcecoldOptions
@@ -244,6 +314,98 @@ public sealed class TrackerTests
     }
 
     [Fact]
+    public void Announce_Disables_Public_Peer_Tracking_When_Configured()
+    {
+        var store = CreateStore(new IcecoldOptions
+        {
+            Tracker = new TrackerOptions
+            {
+                TrackPublicPeers = false
+            },
+            PeerWire = new PeerWireOptions
+            {
+                Enabled = true,
+                AdvertisedIp = "127.0.0.10",
+                AdvertisedPort = 6881
+            }
+        });
+        var infoHash = new string('a', 40);
+
+        var first = store.Announce(CreateAnnounce(
+            infoHash,
+            Enumerable.Repeat((byte)1, 20).ToArray(),
+            "127.0.0.1",
+            6881,
+            left: 0));
+        var second = store.Announce(CreateAnnounce(
+            infoHash,
+            Enumerable.Repeat((byte)2, 20).ToArray(),
+            "127.0.0.2",
+            6882));
+
+        var firstPeer = Assert.Single(first.Peers);
+        Assert.Equal(IPAddress.Parse("127.0.0.10"), firstPeer.IpAddress);
+        Assert.Equal(1, first.Complete);
+        Assert.Equal(0, first.Incomplete);
+
+        var secondPeer = Assert.Single(second.Peers);
+        Assert.Equal(IPAddress.Parse("127.0.0.10"), secondPeer.IpAddress);
+        Assert.Equal(1, second.Complete);
+        Assert.Equal(0, second.Incomplete);
+
+        var scrape = store.Scrape(infoHash);
+        Assert.Equal(1, scrape.Complete);
+        Assert.Equal(0, scrape.Incomplete);
+        Assert.Equal(0, scrape.Downloaded);
+
+        var swarm = store.GetSwarmStats(infoHash);
+        Assert.Equal(0, swarm.Seeders);
+        Assert.Equal(0, swarm.Leechers);
+        Assert.Equal(0, swarm.StandbyEligibleSeeders);
+
+        var stats = store.GetStats();
+        Assert.Equal(0, stats.ActiveInfoHashes);
+        Assert.Equal(0, stats.Peers);
+        Assert.Equal(0, stats.Seeders);
+        Assert.Equal(0, stats.Leechers);
+        Assert.Equal(0, stats.CompletedAnnounces);
+    }
+
+    [Fact]
+    public void Announce_Disabled_Public_Peer_Tracking_Still_Honors_Numwant_Zero()
+    {
+        var store = CreateStore(new IcecoldOptions
+        {
+            Tracker = new TrackerOptions
+            {
+                TrackPublicPeers = false
+            },
+            PeerWire = new PeerWireOptions
+            {
+                Enabled = true,
+                AdvertisedIp = "127.0.0.10",
+                AdvertisedPort = 6881
+            }
+        });
+
+        var result = store.Announce(new TrackerAnnounceInput(
+            new string('a', 40),
+            Enumerable.Repeat((byte)2, 20).ToArray(),
+            IPAddress.Parse("127.0.0.2"),
+            6882,
+            0,
+            0,
+            10,
+            null,
+            true,
+            0));
+
+        Assert.Empty(result.Peers);
+        Assert.Equal(1, result.Complete);
+        Assert.Equal(0, result.Incomplete);
+    }
+
+    [Fact]
     public void Announce_Standby_Still_Includes_Icecold_When_Only_Incomplete_Peers_Exist()
     {
         var store = CreateStore(new IcecoldOptions
@@ -256,7 +418,8 @@ public sealed class TrackerTests
                 Standby = new PeerWireStandbyOptions
                 {
                     Enabled = true,
-                    MinimumExternalSeeders = 1
+                    MinimumExternalSeeders = 1,
+                    MinimumExternalSeederAgeSeconds = 0
                 }
             }
         });
@@ -285,7 +448,8 @@ public sealed class TrackerTests
                 Standby = new PeerWireStandbyOptions
                 {
                     Enabled = true,
-                    MinimumExternalSeeders = 1
+                    MinimumExternalSeeders = 1,
+                    MinimumExternalSeederAgeSeconds = 0
                 }
             }
         });
@@ -316,7 +480,8 @@ public sealed class TrackerTests
                 Standby = new PeerWireStandbyOptions
                 {
                     Enabled = true,
-                    MinimumExternalSeeders = 1
+                    MinimumExternalSeeders = 1,
+                    MinimumExternalSeederAgeSeconds = 0
                 }
             }
         });
@@ -333,6 +498,70 @@ public sealed class TrackerTests
 
         Assert.Equal(1, result.Complete);
         Assert.Equal(0, result.Incomplete);
+    }
+
+    [Fact]
+    public void Announce_Standby_Includes_Icecold_When_External_Seeder_Is_Fresh()
+    {
+        var store = CreateStore(new IcecoldOptions
+        {
+            PeerWire = new PeerWireOptions
+            {
+                Enabled = true,
+                AdvertisedIp = "127.0.0.10",
+                AdvertisedPort = 6881,
+                Standby = new PeerWireStandbyOptions
+                {
+                    Enabled = true,
+                    MinimumExternalSeeders = 1,
+                    MinimumExternalSeederAgeSeconds = 300
+                }
+            }
+        });
+        var infoHash = new string('a', 40);
+        var seedPeer = Enumerable.Repeat((byte)1, 20).ToArray();
+        var leechPeer = Enumerable.Repeat((byte)2, 20).ToArray();
+
+        _ = store.Announce(CreateAnnounce(infoHash, seedPeer, "127.0.0.1", 6881, left: 0));
+        var result = store.Announce(CreateAnnounce(infoHash, leechPeer, "127.0.0.2", 6882));
+
+        Assert.Contains(result.Peers, p => p.IpAddress.Equals(IPAddress.Parse("127.0.0.10")));
+        Assert.Equal(2, result.Complete);
+        Assert.Equal(1, result.Incomplete);
+    }
+
+    [Fact]
+    public void Announce_Standby_Counts_Distinct_Source_Ips()
+    {
+        var store = CreateStore(new IcecoldOptions
+        {
+            PeerWire = new PeerWireOptions
+            {
+                Enabled = true,
+                AdvertisedIp = "127.0.0.10",
+                AdvertisedPort = 6881,
+                Standby = new PeerWireStandbyOptions
+                {
+                    Enabled = true,
+                    MinimumExternalSeeders = 2,
+                    MinimumExternalSeederAgeSeconds = 0
+                }
+            }
+        });
+        var infoHash = new string('a', 40);
+        var firstSeed = CreateAnnounce(infoHash, Enumerable.Repeat((byte)1, 20).ToArray(), "203.0.113.1", 6881, left: 0)
+            with { SourceIpAddress = IPAddress.Parse("198.51.100.1") };
+        var secondSeed = CreateAnnounce(infoHash, Enumerable.Repeat((byte)2, 20).ToArray(), "203.0.113.2", 6882, left: 0)
+            with { SourceIpAddress = IPAddress.Parse("198.51.100.1") };
+        var leecher = CreateAnnounce(infoHash, Enumerable.Repeat((byte)3, 20).ToArray(), "198.51.100.2", 6883);
+
+        _ = store.Announce(firstSeed);
+        _ = store.Announce(secondSeed);
+        var result = store.Announce(leecher);
+
+        Assert.Contains(result.Peers, p => p.IpAddress.Equals(IPAddress.Parse("127.0.0.10")));
+        Assert.Equal(3, result.Complete);
+        Assert.Equal(1, result.Incomplete);
     }
 
     [Fact]
@@ -433,6 +662,32 @@ public sealed class TrackerTests
     }
 
     [Fact]
+    public async Task Announce_Endpoint_Returns_NotFound_When_Tracker_Is_Disabled()
+    {
+        await using var db = CreateTrackerDb();
+        var store = new RecordingPeerStore();
+        var controller = CreateTrackerController(db, store, trackerEnabled: false);
+
+        var result = await controller.Announce(CancellationToken.None);
+
+        Assert.IsType<NotFoundResult>(result);
+        Assert.False(store.WasCalled);
+    }
+
+    [Fact]
+    public async Task Scrape_Endpoint_Returns_NotFound_When_Tracker_Is_Disabled()
+    {
+        await using var db = CreateTrackerDb();
+        var store = new RecordingPeerStore();
+        var controller = CreateTrackerController(db, store, trackerEnabled: false);
+
+        var result = await controller.Scrape(CancellationToken.None);
+
+        Assert.IsType<NotFoundResult>(result);
+        Assert.False(store.WasCalled);
+    }
+
+    [Fact]
     public void TrackerOptionsValidator_Rejects_Invalid_Prune_Settings()
     {
         var result = new TrackerOptionsValidator().Validate(null, new IcecoldOptions
@@ -445,10 +700,16 @@ public sealed class TrackerTests
                 MaxPeersReturned = -1,
                 MaxPeersStoredPerTorrent = 0,
                 PruneIntervalSeconds = 0,
+                MaxAnnouncesPerSourceIpPerMinute = -1,
                 AdditionalAnnounceUrls =
                 [
                     "",
                     "ftp://tracker.example.test/announce"
+                ],
+                TrustedIpParameterSources =
+                [
+                    "",
+                    "not-a-network"
                 ]
             }
         });
@@ -460,8 +721,11 @@ public sealed class TrackerTests
         Assert.Contains("Icecold:Tracker:MaxPeersReturned must be at least 0.", result.Failures);
         Assert.Contains("Icecold:Tracker:MaxPeersStoredPerTorrent must be at least 1.", result.Failures);
         Assert.Contains("Icecold:Tracker:PruneIntervalSeconds must be at least 1.", result.Failures);
+        Assert.Contains("Icecold:Tracker:MaxAnnouncesPerSourceIpPerMinute must be at least 0.", result.Failures);
         Assert.Contains("Icecold:Tracker:AdditionalAnnounceUrls entries must not be blank.", result.Failures);
         Assert.Contains("Icecold:Tracker:AdditionalAnnounceUrls entries must be absolute http, https, or udp tracker URLs.", result.Failures);
+        Assert.Contains("Icecold:Tracker:TrustedIpParameterSources entries must not be blank.", result.Failures);
+        Assert.Contains("Icecold:Tracker:TrustedIpParameterSources entries must be IP addresses or CIDR ranges.", result.Failures);
     }
 
     static string PercentEncode(IEnumerable<byte> bytes)
@@ -496,6 +760,31 @@ public sealed class TrackerTests
                 new PeerWireStandbyPolicy(configured)));
     }
 
+    static IcecoldDbContext CreateTrackerDb()
+        => new(new DbContextOptionsBuilder<IcecoldDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString("n"))
+            .Options);
+
+    static TrackerController CreateTrackerController(IcecoldDbContext db, ITrackerPeerStore store, bool trackerEnabled)
+    {
+        var controller = new TrackerController(
+            new TrackerAnnounceService(db, store),
+            new TrackerScrapeService(db, store),
+            Options.Create(new IcecoldOptions
+            {
+                Tracker = new TrackerOptions
+                {
+                    Enabled = trackerEnabled
+                }
+            }));
+        controller.ControllerContext = new ControllerContext
+        {
+            HttpContext = new DefaultHttpContext()
+        };
+
+        return controller;
+    }
+
     sealed class RecordingPeerStore : ITrackerPeerStore
     {
         public bool WasCalled { get; private set; }
@@ -513,6 +802,6 @@ public sealed class TrackerTests
         }
 
         public TrackerSwarmStats GetSwarmStats(string infoHashHex)
-            => new(0, 0);
+            => new(0, 0, 0);
     }
 }

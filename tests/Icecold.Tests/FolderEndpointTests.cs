@@ -1,6 +1,7 @@
 using System.Net;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
@@ -14,6 +15,14 @@ public sealed class FolderEndpointTests
     {
         await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
+            builder.ConfigureAppConfiguration((_, configuration) =>
+            {
+                configuration.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Icecold:AdminApiKey"] = "dev-admin-key"
+                });
+            });
+
             builder.ConfigureServices(services =>
             {
                 services.RemoveAll<IHostedService>();
