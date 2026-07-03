@@ -444,7 +444,12 @@ public sealed class TrackerTests
                 PeerTimeoutSeconds = 0,
                 MaxPeersReturned = -1,
                 MaxPeersStoredPerTorrent = 0,
-                PruneIntervalSeconds = 0
+                PruneIntervalSeconds = 0,
+                AdditionalAnnounceUrls =
+                [
+                    "",
+                    "ftp://tracker.example.test/announce"
+                ]
             }
         });
 
@@ -455,6 +460,8 @@ public sealed class TrackerTests
         Assert.Contains("Icecold:Tracker:MaxPeersReturned must be at least 0.", result.Failures);
         Assert.Contains("Icecold:Tracker:MaxPeersStoredPerTorrent must be at least 1.", result.Failures);
         Assert.Contains("Icecold:Tracker:PruneIntervalSeconds must be at least 1.", result.Failures);
+        Assert.Contains("Icecold:Tracker:AdditionalAnnounceUrls entries must not be blank.", result.Failures);
+        Assert.Contains("Icecold:Tracker:AdditionalAnnounceUrls entries must be absolute http, https, or udp tracker URLs.", result.Failures);
     }
 
     static string PercentEncode(IEnumerable<byte> bytes)

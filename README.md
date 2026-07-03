@@ -6,6 +6,22 @@ Icecold is a cold-archive torrent gateway. Point it at a large backing store, in
 
 The intended niche is sparse downloads from very large collections: archives, datasets, mirrors, and media libraries where most files are cold most of the time. Icecold seeds bytes directly from the backing store, then lets normal BitTorrent peers take over as clients begin sharing with each other.
 
+Icecold is for you if:
+
+- You want to publish many individual files as torrents without manually managing millions of `.torrent` files
+- You want one service that indexes content, stores torrent metadata, runs the tracker, and seeds the initial bytes
+- You control the tracker URL and want clients for the same archive to find each other through your service
+- Most content is cold, but any file may need to become available on demand
+- You want the archive backing store to remain the source of truth while peer swarms opportunistically absorb download traffic
+
+Icecold is probably not for you if:
+
+- You want to seed existing torrents to public trackers
+- You need a general-purpose BitTorrent client that downloads, repairs, or ratio-manages torrents
+- You need DHT, PEX, outbound peer dialing, uTP, or multi-tracker swarm participation
+- You want a distributed tracker or multi-node peer store today
+- You only need to serve a small number of hot torrents from a normal seedbox
+
 ## Contents
 
 - [What It Does](#what-it-does)
@@ -159,6 +175,9 @@ Icecold__PeerWire__Standby__MinimumExternalSeeders=2
 Icecold:ContentSources:0:RootPath
 Icecold__ContentSources__0__RootPath=/data/files
 
+Icecold:Tracker:AdditionalAnnounceUrls:0
+Icecold__Tracker__AdditionalAnnounceUrls__0=udp://tracker.example.net:6969/announce
+
 ConnectionStrings:Icecold
 ConnectionStrings__Icecold=Host=postgres;Port=5432;Database=icecold;Username=icecold;Password=...
 ```
@@ -172,6 +191,8 @@ services:
     environment:
       Icecold__WebSeed__Enabled: "true"
       Icecold__WebSeed__PublicBaseUrl: "https://cdn.example.org"
+      Icecold__Tracker__AdditionalAnnounceUrls__0: "udp://tracker.example.net:6969/announce"
+      Icecold__Tracker__AdditionalAnnounceUrls__1: "https://backup.example.test/announce"
       Icecold__PeerWire__Enabled: "true"
       Icecold__PeerWire__AdvertisedIp: "203.0.113.10"
       Icecold__PeerWire__AdvertisedPort: "6881"
@@ -188,6 +209,8 @@ docker compose -f compose.prod.yaml -f compose.prod.override.yaml up -d
 ```
 
 If peer-wire is enabled, `Icecold:PeerWire:AdvertisedIp` must be an IP address, not a hostname. BitTorrent compact peer responses cannot carry DNS names.
+
+Additional tracker URLs are appended after Icecold's own `/announce` URL in generated `.torrent` files and magnet links.
 
 Icecold refuses to start if both `Icecold:WebSeed:Enabled` and `Icecold:PeerWire:Enabled` are false.
 

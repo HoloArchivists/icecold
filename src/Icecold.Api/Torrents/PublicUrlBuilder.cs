@@ -16,6 +16,13 @@ public sealed class PublicUrlBuilder(IOptions<IcecoldOptions> options)
 
     public string TrackerAnnounceUrl => $"{publicBaseUrl}/announce";
 
+    public IReadOnlyList<string> TrackerAnnounceUrls
+        => [.. new[] { TrackerAnnounceUrl }
+            .Concat(icecold.Tracker.AdditionalAnnounceUrls)
+            .Where(url => !string.IsNullOrWhiteSpace(url))
+            .Select(url => url.Trim())
+            .Distinct(StringComparer.Ordinal)];
+
     public string BuildWebSeedUrl(string infoHashHex, string displayName)
         => $"{webSeedPublicBaseUrl}/webseed/{infoHashHex}/{Uri.EscapeDataString(displayName)}";
 
@@ -28,7 +35,7 @@ public sealed class PublicUrlBuilder(IOptions<IcecoldOptions> options)
         return "magnet:?xt=urn:btih:" + Uri.EscapeDataString(torrent.InfoHashHex)
             + "&dn=" + Uri.EscapeDataString(torrent.DisplayName)
             + "&xl=" + torrent.ContentLength
-            + "&tr=" + Uri.EscapeDataString(TrackerAnnounceUrl)
+            + string.Concat(TrackerAnnounceUrls.Select(url => "&tr=" + Uri.EscapeDataString(url)))
             + (WebSeedEnabled ? "&ws=" + Uri.EscapeDataString(webSeed) : "");
     }
 }

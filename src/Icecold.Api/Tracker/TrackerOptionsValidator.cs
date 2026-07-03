@@ -28,6 +28,21 @@ public sealed class TrackerOptionsValidator : IValidateOptions<IcecoldOptions>
         if (tracker.PruneIntervalSeconds < 1)
             failures.Add("Icecold:Tracker:PruneIntervalSeconds must be at least 1.");
 
+        foreach (var url in tracker.AdditionalAnnounceUrls)
+        {
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                failures.Add("Icecold:Tracker:AdditionalAnnounceUrls entries must not be blank.");
+                continue;
+            }
+
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)
+                || !(uri.Scheme is "http" or "https" or "udp"))
+            {
+                failures.Add("Icecold:Tracker:AdditionalAnnounceUrls entries must be absolute http, https, or udp tracker URLs.");
+            }
+        }
+
         return failures.Count == 0
             ? ValidateOptionsResult.Success
             : ValidateOptionsResult.Fail(failures);

@@ -48,6 +48,8 @@ public sealed class TrackerOptions
     public int MaxPeersStoredPerTorrent { get; set; } = 1000;
 
     public int PruneIntervalSeconds { get; set; } = 300;
+
+    public List<string> AdditionalAnnounceUrls { get; set; } = [];
 }
 
 public sealed class StatsOptions

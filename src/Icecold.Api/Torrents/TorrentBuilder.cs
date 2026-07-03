@@ -37,6 +37,9 @@ public sealed class TorrentBuilder(PublicUrlBuilder urls)
             ["created by"] = CreatedBy,
             ["info"] = info
         };
+        if (urls.TrackerAnnounceUrls.Count > 1)
+            torrent["announce-list"] = BuildAnnounceList(urls.TrackerAnnounceUrls);
+
         if (webSeedUrl is not null)
             torrent["url-list"] = webSeedUrl;
 
@@ -47,6 +50,11 @@ public sealed class TorrentBuilder(PublicUrlBuilder urls)
             pieceCount,
             webSeedUrl);
     }
+
+    static IReadOnlyList<object> BuildAnnounceList(IReadOnlyList<string> trackerUrls)
+        => trackerUrls
+            .Select(url => (object)new List<object> { url })
+            .ToList();
 
     static int SelectPieceLength(long length)
     {

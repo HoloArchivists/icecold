@@ -31,7 +31,15 @@ public sealed class TorrentMetadataService(IcecoldDbContext db, PublicUrlBuilder
     byte[] NormalizeTorrentBytes(TorrentRecord torrent)
     {
         var decoded = BEncodedDictionary.DecodeTorrent(torrent.TorrentBytes!).torrent;
+        var announceKey = new BEncodedString("announce");
+        var announceListKey = new BEncodedString("announce-list");
         var webSeedKey = new BEncodedString("url-list");
+
+        decoded[announceKey] = new BEncodedString(urls.TrackerAnnounceUrl);
+        if (urls.TrackerAnnounceUrls.Count > 1)
+            decoded[announceListKey] = BuildAnnounceList(urls.TrackerAnnounceUrls);
+        else
+            decoded.Remove(announceListKey);
 
         if (urls.WebSeedEnabled)
             decoded[webSeedKey] = new BEncodedString(urls.BuildWebSeedUrl(torrent.InfoHashHex!, torrent.DisplayName));
@@ -39,6 +47,15 @@ public sealed class TorrentMetadataService(IcecoldDbContext db, PublicUrlBuilder
             decoded.Remove(webSeedKey);
 
         return decoded.Encode();
+    }
+
+    static BEncodedList BuildAnnounceList(IReadOnlyList<string> trackerUrls)
+    {
+        var announceList = new BEncodedList();
+        foreach (var trackerUrl in trackerUrls)
+            announceList.Add(new BEncodedList { new BEncodedString(trackerUrl) });
+
+        return announceList;
     }
 }
 

@@ -57,6 +57,37 @@ public sealed class TorrentBuilderTests : IDisposable
     }
 
     [Fact]
+    public async Task BuildMagnet_And_Torrent_File_Include_Additional_Trackers()
+    {
+        await File.WriteAllTextAsync(Path.Combine(root, "payload.bin"), "payload bytes");
+        var source = new LocalFileContentSource("local", root);
+        var metadata = await source.GetMetadataAsync("payload.bin", CancellationToken.None);
+        var urls = CreateUrls(additionalTrackers:
+        [
+            "udp://tracker.example.net:6969/announce",
+            "https://backup.example.test/announce"
+        ]);
+        var torrent = await new TorrentBuilder(urls).BuildSingleFileAsync(metadata, source, null, CancellationToken.None);
+
+        var magnet = urls.BuildMagnet(new TorrentRecord
+        {
+            InfoHashHex = torrent.InfoHashHex,
+            DisplayName = metadata.DisplayName,
+            ContentLength = metadata.Length
+        });
+        var decoded = BEncodedDictionary.DecodeTorrent(torrent.TorrentBytes).torrent;
+        var announceList = (BEncodedList)decoded[new BEncodedString("announce-list")];
+
+        Assert.Contains("tr=https%3A%2F%2Fexample.test%2Fannounce", magnet);
+        Assert.Contains("tr=udp%3A%2F%2Ftracker.example.net%3A6969%2Fannounce", magnet);
+        Assert.Contains("tr=https%3A%2F%2Fbackup.example.test%2Fannounce", magnet);
+        Assert.Equal(3, announceList.Count);
+        Assert.Equal("https://example.test/announce", ((BEncodedList)announceList[0])[0].ToString());
+        Assert.Equal("udp://tracker.example.net:6969/announce", ((BEncodedList)announceList[1])[0].ToString());
+        Assert.Equal("https://backup.example.test/announce", ((BEncodedList)announceList[2])[0].ToString());
+    }
+
+    [Fact]
     public async Task BuildMagnet_Uses_WebSeed_Public_Base_Url_Override()
     {
         await File.WriteAllTextAsync(Path.Combine(root, "payload.bin"), "payload bytes");
@@ -146,6 +177,29 @@ public sealed class TorrentBuilderTests : IDisposable
         Assert.Equal($"https://example.test/webseed/{built.InfoHashHex}/payload.bin", webSeed);
     }
 
+    [Fact]
+    public async Task GetTorrentFileAsync_Normalizes_Additional_Trackers_For_Stored_Torrent()
+    {
+        await File.WriteAllTextAsync(Path.Combine(root, "payload.bin"), "payload bytes");
+        var source = new LocalFileContentSource("local", root);
+        var metadata = await source.GetMetadataAsync("payload.bin", CancellationToken.None);
+        var built = await new TorrentBuilder(CreateUrls()).BuildSingleFileAsync(metadata, source, null, CancellationToken.None);
+        await using var db = CreateDb(built, metadata);
+        var service = new TorrentMetadataService(db, CreateUrls(additionalTrackers:
+        [
+            "udp://tracker.example.net:6969/announce"
+        ]));
+
+        var result = await service.GetTorrentFileAsync(built.InfoHashHex, CancellationToken.None);
+        var decoded = BEncodedDictionary.DecodeTorrent(result!.Bytes).torrent;
+        var announceList = (BEncodedList)decoded[new BEncodedString("announce-list")];
+
+        Assert.Equal("https://example.test/announce", decoded[new BEncodedString("announce")].ToString());
+        Assert.Equal(2, announceList.Count);
+        Assert.Equal("https://example.test/announce", ((BEncodedList)announceList[0])[0].ToString());
+        Assert.Equal("udp://tracker.example.net:6969/announce", ((BEncodedList)announceList[1])[0].ToString());
+    }
+
     static IcecoldDbContext CreateDb(TorrentBuildResult built, ContentMetadata metadata)
     {
         var db = new IcecoldDbContext(new DbContextOptionsBuilder<IcecoldDbContext>()
@@ -174,10 +228,17 @@ public sealed class TorrentBuilderTests : IDisposable
         return db;
     }
 
-    static PublicUrlBuilder CreateUrls(bool webSeedEnabled = true, string? webSeedPublicBaseUrl = null)
+    static PublicUrlBuilder CreateUrls(
+        bool webSeedEnabled = true,
+        string? webSeedPublicBaseUrl = null,
+        List<string>? additionalTrackers = null)
         => new(Options.Create(new IcecoldOptions
         {
             PublicBaseUrl = "https://example.test",
+            Tracker = new TrackerOptions
+            {
+                AdditionalAnnounceUrls = additionalTrackers ?? []
+            },
             WebSeed = new WebSeedOptions
             {
                 Enabled = webSeedEnabled,
