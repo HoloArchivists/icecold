@@ -2,7 +2,7 @@
 
 > ⚠️ Vibecoded slopware. Proceed with caution.
 
-Icecold is a cold-archive torrent gateway. Point it at a large backing store, index files into individual torrents, and hand out `.torrent` files or magnet links — no separate tracker, webseed server, or always-on seeder stack needed.
+Icecold is a cold-archive torrent gateway. Point it at a large backing store, index files into individual torrents, and hand out `.torrent` files or magnet links with tracker, webseed, and initial peer-wire seeding built in.
 
 The intended niche is sparse downloads from very large collections: archives, datasets, mirrors, and media libraries where most files are cold most of the time. Icecold seeds bytes directly from the backing store, then lets normal BitTorrent peers take over as clients begin sharing with each other.
 
@@ -14,7 +14,7 @@ Icecold is for you if:
 - Most content is cold, but any file may need to become available on demand
 - You want the archive backing store to remain the source of truth while peer swarms opportunistically absorb download traffic
 
-Icecold is probably not for you if:
+Icecold may not fit if:
 
 - You want to seed existing torrents to public trackers
 - You need a general-purpose BitTorrent client that downloads, repairs, or ratio-manages torrents
@@ -43,11 +43,11 @@ Icecold is probably not for you if:
 
 ## Limitations
 
-- Only single-file indexing is implemented. Folder indexing returns `501 Not Implemented`.
+- Single-file indexing is implemented. Folder indexing returns `501 Not Implemented`.
 - Peer-wire is upload-only TCP, including `ut_metadata` for magnet clients and MSE/RC4 encryption. Icecold does not download from peers, initiate outbound connections, or support uTP.
 - The tracker peer store is in-memory and single-instance.
-- Only local filesystem content sources are implemented. S3 and HTTP backends would fit the existing `IContentSource` interface but are not built yet.
-- Not hardened for public multi-tenant use.
+- Local filesystem content sources are implemented. S3 and HTTP backends would fit the existing `IContentSource` interface but are not built yet.
+- Public multi-tenant hardening is out of scope.
 
 ## Deployment
 
@@ -89,7 +89,7 @@ docker compose -f compose.prod.yaml up -d
 
 - `ICECOLD_CONTENT_ROOT` is mounted read-only at `/data/files` inside the container.
 - Set `ICECOLD_AUTO_MIGRATE=false` to manage database migrations separately.
-- `compose.prod.yaml` only maps deployment essentials. Use a Compose override for app-level settings such as peer-wire, webseed, super-seeding, standby mode, indexing concurrency, and tracker limits.
+- `compose.prod.yaml` maps deployment essentials. Use a Compose override for app-level settings such as peer-wire, webseed, super-seeding, standby mode, indexing concurrency, and tracker limits.
 - For internet-facing deployments, put Icecold behind a reverse proxy that terminates TLS. If peer-wire is enabled, it uses plain TCP on `ICECOLD_PEERWIRE_PORT` and must be reachable directly by BitTorrent clients.
 
 ## API
@@ -182,7 +182,7 @@ ConnectionStrings:Icecold
 ConnectionStrings__Icecold=Host=postgres;Port=5432;Database=icecold;Username=icecold;Password=...
 ```
 
-For production, put app-level customizations in a Compose override instead of adding more `ICECOLD_*` aliases to `.env`:
+For production, put app-level customizations in a Compose override:
 
 ```yaml
 # compose.prod.override.yaml
@@ -212,11 +212,11 @@ If peer-wire is enabled, `Icecold:PeerWire:AdvertisedIp` must be an IP address, 
 
 Additional tracker URLs are appended after Icecold's own `/announce` URL in generated `.torrent` files and magnet links.
 
-Icecold refuses to start if both `Icecold:WebSeed:Enabled` and `Icecold:PeerWire:Enabled` are false.
+Startup validation requires at least one enabled serving transport: `Icecold:WebSeed:Enabled` or `Icecold:PeerWire:Enabled`.
 
 Super-seeding is intended for torrents with multiple leechers. With only one leecher, Icecold still makes progress by revealing the next piece after the current advertised piece has been fully uploaded, but throughput can be lower than normal peer-wire mode because the client only sees a small piece window. Threshold-based super-seeding only affects new peer-wire connections; a client that already received the full bitfield stays in normal mode until it reconnects.
 
-Swarm standby mode uses the built-in tracker's external seeder count, not total peers. Leechers with partial data do not make a torrent look healthy, so Icecold keeps advertising/uploading until enough non-Icecold peers announce `left=0`.
+Swarm standby mode uses the built-in tracker's external seeder count. Leechers with partial data are ignored for standby decisions, so Icecold keeps advertising/uploading until enough non-Icecold peers announce `left=0`.
 
 ## Development
 
@@ -253,7 +253,7 @@ printf 'hello from icecold\n' > src/Icecold.Api/data/files/example.txt
 
 ### Running Without Docker
 
-Start only PostgreSQL (exposed on host port `55432` to avoid conflicting with a local instance on `5432`):
+Start PostgreSQL by itself. Compose exposes it on host port `55432` to avoid conflicting with a local instance on `5432`:
 
 ```bash
 docker compose up -d postgres
