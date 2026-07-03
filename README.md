@@ -57,6 +57,9 @@ ICECOLD_WEBSEED_ENABLED=true
 # Optional: use a different public origin for advertised webseed URLs, for example a CDN.
 ICECOLD_WEBSEED_PUBLIC_BASE_URL=
 ICECOLD_PEERWIRE_ENABLED=true
+ICECOLD_PEERWIRE_SUPERSEED_ENABLED=false
+ICECOLD_PEERWIRE_SUPERSEED_MINIMUM_PEER_COUNT=0
+ICECOLD_PEERWIRE_SUPERSEED_MAX_PIECES_PER_PEER=1
 ICECOLD_PEERWIRE_ADVERTISED_IP=203.0.113.10
 ICECOLD_PEERWIRE_PORT=6881
 ICECOLD_PEERWIRE_ADVERTISED_PORT=6881
@@ -171,6 +174,9 @@ Settings live under `Icecold` in `appsettings.json`:
 | `WebSeed:Enabled` | `true` | Enable HTTP webseed serving and advertise `/webseed` URLs in `.torrent` files and magnet links. At least one of `WebSeed:Enabled` or `PeerWire:Enabled` must be true |
 | `WebSeed:PublicBaseUrl` | — | Optional public origin for advertised webseed URLs. Leave empty to use `PublicBaseUrl`; set it for a CDN or separate webseed reverse proxy |
 | `PeerWire:Enabled` | `false` | Enable the upload-only TCP peer-wire seeding listener. At least one of `WebSeed:Enabled` or `PeerWire:Enabled` must be true |
+| `PeerWire:SuperSeed:Enabled` | `false` | Enable initial/super-seeding behavior. When false, super-seeding is completely disabled |
+| `PeerWire:SuperSeed:MinimumPeerCount` | `0` | Minimum active peer-wire connections for an infohash before new connections use super-seeding. `0` means always super-seed when enabled |
+| `PeerWire:SuperSeed:MaxPiecesPerPeer` | `1` | Number of pieces to advertise to each peer at once while super-seeding |
 | `PeerWire:BindAddress` | `0.0.0.0` | Local IP to bind the listener; `0.0.0.0` listens on all interfaces |
 | `PeerWire:ListenPort` | `6881` | TCP port to accept incoming peer connections on |
 | `PeerWire:AdvertisedIp` | — | Public IP advertised in tracker responses. Must be an IP address — BitTorrent compact peer responses cannot carry DNS names. Required when `Enabled` is true |
@@ -183,6 +189,8 @@ Settings live under `Icecold` in `appsettings.json`:
 | `ContentSources[].Name` | — | Unique source identifier (case-insensitive) used in indexing requests and stored with each torrent |
 | `ContentSources[].Type` | `local` | Source implementation type. Only `local` is supported; S3 and HTTP sources are not yet available |
 | `ContentSources[].RootPath` | — | Base directory for a local source. Relative paths are resolved from the application content root. If `ContentSources` is omitted entirely, a default `local` source is created at `{ContentRootPath}/data/files` |
+
+Super-seeding is intended for torrents with multiple leechers. With only one leecher, Icecold still makes progress by revealing the next piece after the current advertised piece has been fully uploaded, but throughput can be lower than normal peer-wire mode because the client only sees a small piece window. Threshold-based super-seeding only affects new peer-wire connections; a client that already received the full bitfield stays in normal mode until it reconnects.
 
 ## Development
 

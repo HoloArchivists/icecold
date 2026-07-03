@@ -15,6 +15,9 @@ services:
       Icecold__AdminApiKey: dev-admin-key
       Icecold__WebSeed__Enabled: ${ICECOLD_WEBSEED_ENABLED:-true}
       Icecold__PeerWire__Enabled: "true"
+      Icecold__PeerWire__SuperSeed__Enabled: ${ICECOLD_PEERWIRE_SUPERSEED_ENABLED:-false}
+      Icecold__PeerWire__SuperSeed__MinimumPeerCount: ${ICECOLD_PEERWIRE_SUPERSEED_MINIMUM_PEER_COUNT:-0}
+      Icecold__PeerWire__SuperSeed__MaxPiecesPerPeer: ${ICECOLD_PEERWIRE_SUPERSEED_MAX_PIECES_PER_PEER:-1}
       Icecold__PeerWire__BindAddress: 0.0.0.0
       Icecold__PeerWire__ListenPort: 6881
     ports:

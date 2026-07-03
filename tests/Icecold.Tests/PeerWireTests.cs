@@ -88,6 +88,7 @@ public sealed class PeerWireTests : IDisposable
         var handler = new PeerWireConnectionHandler(
             CreateResolver(provider),
             new PeerWirePeerIdentity(),
+            new PeerWireSuperSeedCoordinator(),
             Options.Create(new IcecoldOptions { PeerWire = new PeerWireOptions { Enabled = true, MaxBlockLength = 16 * 1024 } }),
             NullLogger<PeerWireConnectionHandler>.Instance);
         await using var stream = new DuplexTestStream();
@@ -123,6 +124,131 @@ public sealed class PeerWireTests : IDisposable
     }
 
     [Fact]
+    public async Task Handler_SuperSeeds_One_Piece_At_A_Time()
+    {
+        var content = Enumerable.Range(0, 300 * 1024).Select(i => (byte)(i % 251)).ToArray();
+        await File.WriteAllBytesAsync(Path.Combine(root, "payload.bin"), content);
+        var source = new LocalFileContentSource("local", root);
+        var metadata = await source.GetMetadataAsync("payload.bin", CancellationToken.None);
+        var torrentResult = await new TorrentBuilder(new PublicUrlBuilder(Options.Create(new IcecoldOptions { PublicBaseUrl = "http://example.test" })))
+            .BuildSingleFileAsync(metadata, source, null, CancellationToken.None);
+        await using var db = CreateDb(torrentResult, metadata);
+        await using var provider = CreateProvider(db);
+        var handler = new PeerWireConnectionHandler(
+            CreateResolver(provider),
+            new PeerWirePeerIdentity(),
+            new PeerWireSuperSeedCoordinator(),
+            Options.Create(new IcecoldOptions
+            {
+                PeerWire = new PeerWireOptions
+                {
+                    Enabled = true,
+                    MaxBlockLength = torrentResult.PieceLength,
+                    SuperSeed = new PeerWireSuperSeedOptions
+                    {
+                        Enabled = true,
+                        MaxPiecesPerPeer = 1
+                    }
+                }
+            }),
+            NullLogger<PeerWireConnectionHandler>.Instance);
+        await using var stream = new DuplexTestStream();
+        var peerId = Enumerable.Repeat((byte)'S', 20).ToArray();
+
+        await stream.WriteClientAsync(BuildHandshake(Convert.FromHexString(torrentResult.InfoHashHex), peerId));
+        var handling = handler.HandleAsync(stream.ServerStream, CancellationToken.None);
+
+        _ = await stream.ReadClientAsync(68);
+
+        var initialHave = await ReadMessageAsync(stream);
+        Assert.Equal(4, initialHave.Id);
+        Assert.Equal(0, BinaryPrimitives.ReadInt32BigEndian(initialHave.Payload));
+
+        var unchoke = await ReadMessageAsync(stream);
+        Assert.Equal(1, unchoke.Id);
+
+        await stream.WriteClientAsync(BuildInterested());
+        await stream.WriteClientAsync(BuildRequest(pieceIndex: 0, begin: 0, length: torrentResult.PieceLength));
+
+        var piece = await ReadMessageAsync(stream);
+        Assert.Equal(7, piece.Id);
+        Assert.Equal(0, BinaryPrimitives.ReadInt32BigEndian(piece.Payload.AsSpan(0, 4)));
+        Assert.Equal(0, BinaryPrimitives.ReadInt32BigEndian(piece.Payload.AsSpan(4, 4)));
+        Assert.True(piece.Payload.AsSpan(8).SequenceEqual(content.AsSpan(0, torrentResult.PieceLength)));
+
+        var nextHave = await ReadMessageAsync(stream);
+        Assert.Equal(4, nextHave.Id);
+        Assert.Equal(1, BinaryPrimitives.ReadInt32BigEndian(nextHave.Payload));
+
+        stream.CompleteClientWrites();
+        await handling.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task Handler_ThresholdSuperSeeds_New_Connections_When_Minimum_Peer_Count_Is_Reached()
+    {
+        var content = Enumerable.Range(0, 300 * 1024).Select(i => (byte)(i % 251)).ToArray();
+        await File.WriteAllBytesAsync(Path.Combine(root, "payload.bin"), content);
+        var source = new LocalFileContentSource("local", root);
+        var metadata = await source.GetMetadataAsync("payload.bin", CancellationToken.None);
+        var torrentResult = await new TorrentBuilder(new PublicUrlBuilder(Options.Create(new IcecoldOptions { PublicBaseUrl = "http://example.test" })))
+            .BuildSingleFileAsync(metadata, source, null, CancellationToken.None);
+        await using var db = CreateDb(torrentResult, metadata);
+        await using var provider = CreateProvider(db);
+        var coordinator = new PeerWireSuperSeedCoordinator();
+        var handler = new PeerWireConnectionHandler(
+            CreateResolver(provider),
+            new PeerWirePeerIdentity(),
+            coordinator,
+            Options.Create(new IcecoldOptions
+            {
+                PeerWire = new PeerWireOptions
+                {
+                    Enabled = true,
+                    MaxBlockLength = torrentResult.PieceLength,
+                    SuperSeed = new PeerWireSuperSeedOptions
+                    {
+                        Enabled = true,
+                        MinimumPeerCount = 2,
+                        MaxPiecesPerPeer = 1
+                    }
+                }
+            }),
+            NullLogger<PeerWireConnectionHandler>.Instance);
+        await using var first = new DuplexTestStream();
+        await using var second = new DuplexTestStream();
+
+        await first.WriteClientAsync(BuildHandshake(
+            Convert.FromHexString(torrentResult.InfoHashHex),
+            Enumerable.Repeat((byte)'A', 20).ToArray()));
+        var firstHandling = handler.HandleAsync(first.ServerStream, CancellationToken.None);
+
+        _ = await first.ReadClientAsync(68);
+        var firstBitfield = await ReadMessageAsync(first);
+        Assert.Equal(5, firstBitfield.Id);
+
+        var firstUnchoke = await ReadMessageAsync(first);
+        Assert.Equal(1, firstUnchoke.Id);
+
+        await second.WriteClientAsync(BuildHandshake(
+            Convert.FromHexString(torrentResult.InfoHashHex),
+            Enumerable.Repeat((byte)'B', 20).ToArray()));
+        var secondHandling = handler.HandleAsync(second.ServerStream, CancellationToken.None);
+
+        _ = await second.ReadClientAsync(68);
+        var secondHave = await ReadMessageAsync(second);
+        Assert.Equal(4, secondHave.Id);
+        Assert.Equal(0, BinaryPrimitives.ReadInt32BigEndian(secondHave.Payload));
+
+        var secondUnchoke = await ReadMessageAsync(second);
+        Assert.Equal(1, secondUnchoke.Id);
+
+        first.CompleteClientWrites();
+        second.CompleteClientWrites();
+        await Task.WhenAll(firstHandling, secondHandling).WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
     public async Task Handler_Serves_Requested_Block_Over_Mse()
     {
         var content = Encoding.ASCII.GetBytes("hello encrypted peer wire");
@@ -136,6 +262,7 @@ public sealed class PeerWireTests : IDisposable
         var handler = new PeerWireConnectionHandler(
             CreateResolver(provider),
             new PeerWirePeerIdentity(),
+            new PeerWireSuperSeedCoordinator(),
             Options.Create(new IcecoldOptions { PeerWire = new PeerWireOptions { Enabled = true, MaxBlockLength = 16 * 1024 } }),
             NullLogger<PeerWireConnectionHandler>.Instance);
         var negotiator = CreateTransportNegotiator(provider);
@@ -193,6 +320,7 @@ public sealed class PeerWireTests : IDisposable
         var handler = new PeerWireConnectionHandler(
             CreateResolver(provider),
             new PeerWirePeerIdentity(),
+            new PeerWireSuperSeedCoordinator(),
             Options.Create(new IcecoldOptions { PeerWire = new PeerWireOptions { Enabled = true, MaxBlockLength = 16 * 1024 } }),
             NullLogger<PeerWireConnectionHandler>.Instance);
         await using var stream = new DuplexTestStream();
@@ -249,6 +377,7 @@ public sealed class PeerWireTests : IDisposable
         var handler = new PeerWireConnectionHandler(
             CreateResolver(provider),
             new PeerWirePeerIdentity(),
+            new PeerWireSuperSeedCoordinator(),
             Options.Create(new IcecoldOptions { PeerWire = new PeerWireOptions { Enabled = true } }),
             NullLogger<PeerWireConnectionHandler>.Instance);
         await using var stream = new DuplexTestStream();
@@ -269,6 +398,7 @@ public sealed class PeerWireTests : IDisposable
         var handler = new PeerWireConnectionHandler(
             CreateResolver(provider),
             new PeerWirePeerIdentity(),
+            new PeerWireSuperSeedCoordinator(),
             Options.Create(new IcecoldOptions
             {
                 PeerWire = new PeerWireOptions
@@ -298,6 +428,7 @@ public sealed class PeerWireTests : IDisposable
         var handler = new PeerWireConnectionHandler(
             CreateResolver(provider),
             new PeerWirePeerIdentity(),
+            new PeerWireSuperSeedCoordinator(),
             Options.Create(new IcecoldOptions
             {
                 PeerWire = new PeerWireOptions

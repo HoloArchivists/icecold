@@ -47,6 +47,7 @@ builder.Services.AddSingleton<TorrentLocationService>();
 builder.Services.AddSingleton<IIndexingQueue, ChannelIndexingQueue>();
 builder.Services.AddSingleton<PeerWirePeerIdentity>();
 builder.Services.AddSingleton<PeerWireAdvertisedPeerProvider>();
+builder.Services.AddSingleton<PeerWireSuperSeedCoordinator>();
 builder.Services.AddSingleton<PeerWireTorrentResolver>();
 builder.Services.AddSingleton<PeerWireTransportNegotiator>();
 builder.Services.AddSingleton<PeerWireConnectionHandler>();

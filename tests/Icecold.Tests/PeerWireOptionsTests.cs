@@ -74,4 +74,33 @@ public sealed class PeerWireOptionsTests
         Assert.Contains("Icecold:PeerWire:HandshakeTimeoutSeconds must be between 1 and 300.", result.Failures);
         Assert.Contains("Icecold:PeerWire:IdleTimeoutSeconds must be between 1 and 3600.", result.Failures);
     }
+
+    [Fact]
+    public void Validate_Fails_When_SuperSeed_Settings_Are_Invalid()
+    {
+        var result = new PeerWireOptionsValidator().Validate(null, new IcecoldOptions
+        {
+            PeerWire = new PeerWireOptions
+            {
+                Enabled = true,
+                BindAddress = "0.0.0.0",
+                ListenPort = 6881,
+                AdvertisedIp = "192.168.0.150",
+                AdvertisedPort = 6881,
+                MaxBlockLength = 16 * 1024,
+                MaxOutstandingRequests = 8192,
+                MaxConnections = 128,
+                SuperSeed = new PeerWireSuperSeedOptions
+                {
+                    Enabled = true,
+                    MinimumPeerCount = -1,
+                    MaxPiecesPerPeer = 0
+                }
+            }
+        });
+
+        Assert.True(result.Failed);
+        Assert.Contains("Icecold:PeerWire:SuperSeed:MaxPiecesPerPeer must be between 1 and 64.", result.Failures);
+        Assert.Contains("Icecold:PeerWire:SuperSeed:MinimumPeerCount must be between 0 and 100000.", result.Failures);
+    }
 }

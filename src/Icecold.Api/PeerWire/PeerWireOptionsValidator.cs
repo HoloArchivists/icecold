@@ -40,6 +40,12 @@ public sealed class PeerWireOptionsValidator : IValidateOptions<IcecoldOptions>
         if (peerWire.IdleTimeoutSeconds is < 1 or > 3600)
             failures.Add("Icecold:PeerWire:IdleTimeoutSeconds must be between 1 and 3600.");
 
+        if (peerWire.SuperSeed.MaxPiecesPerPeer is < 1 or > 64)
+            failures.Add("Icecold:PeerWire:SuperSeed:MaxPiecesPerPeer must be between 1 and 64.");
+
+        if (peerWire.SuperSeed.MinimumPeerCount is < 0 or > 100000)
+            failures.Add("Icecold:PeerWire:SuperSeed:MinimumPeerCount must be between 0 and 100000.");
+
         return failures.Count == 0
             ? ValidateOptionsResult.Success
             : ValidateOptionsResult.Fail(failures);

@@ -68,6 +68,8 @@ public sealed class PeerWireOptions
 {
     public bool Enabled { get; set; }
 
+    public PeerWireSuperSeedOptions SuperSeed { get; set; } = new();
+
     public string BindAddress { get; set; } = "0.0.0.0";
 
     public int ListenPort { get; set; } = 6881;
@@ -85,6 +87,15 @@ public sealed class PeerWireOptions
     public int HandshakeTimeoutSeconds { get; set; } = 15;
 
     public int IdleTimeoutSeconds { get; set; } = 120;
+}
+
+public sealed class PeerWireSuperSeedOptions
+{
+    public bool Enabled { get; set; }
+
+    public int MinimumPeerCount { get; set; }
+
+    public int MaxPiecesPerPeer { get; set; } = 1;
 }
 
 public sealed class ContentSourceOptions

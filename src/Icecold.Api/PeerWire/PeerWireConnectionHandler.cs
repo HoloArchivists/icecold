@@ -10,6 +10,7 @@ namespace Icecold.Api.PeerWire;
 public sealed class PeerWireConnectionHandler(
     PeerWireTorrentResolver torrents,
     PeerWirePeerIdentity identity,
+    PeerWireSuperSeedCoordinator superSeedCoordinator,
     IOptions<IcecoldOptions> options,
     ILogger<PeerWireConnectionHandler> logger)
 {
@@ -23,6 +24,8 @@ public sealed class PeerWireConnectionHandler(
         PeerWireTorrentContext? torrent = null;
         var infoHashHex = "";
         var state = new PeerWireSessionState();
+        PeerWirePeerLease? peerLease = null;
+        PeerWireSuperSeedSession? superSeedSession = null;
         try
         {
             var handshake = await ReadHandshakeAsync(stream, cancellationToken);
@@ -46,18 +49,35 @@ public sealed class PeerWireConnectionHandler(
                 return;
             }
 
+            peerLease = superSeedCoordinator.TrackPeer(torrent.InfoHashHex);
             await WriteHandshakeAsync(stream, handshake.InfoHash, cancellationToken);
             if (handshake.SupportsExtensions)
                 await WriteExtensionHandshakeAsync(stream, torrent, cancellationToken);
 
-            await WriteBitfieldAsync(stream, torrent.PieceCount, cancellationToken);
+            var superSeed = options.Value.PeerWire.SuperSeed;
+            var superSeedEnabled = ShouldUseSuperSeed(superSeed, peerLease.ActivePeerCount);
+            if (superSeedEnabled)
+            {
+                superSeedSession = superSeedCoordinator.CreateSession(
+                    torrent.InfoHashHex,
+                    torrent.PieceCount,
+                    superSeed.MaxPiecesPerPeer);
+                await WriteHaveMessagesAsync(stream, superSeedSession.AssignAvailable(), cancellationToken);
+            }
+            else
+            {
+                await WriteBitfieldAsync(stream, torrent.PieceCount, cancellationToken);
+            }
+
             await WriteMessageAsync(stream, PeerWireMessageId.Unchoke, ReadOnlyMemory<byte>.Empty, cancellationToken);
             logger.LogDebug(
-                "Peer-wire announced {PieceCount} pieces and unchoked {InfoHash}.",
+                "Peer-wire announced {PieceCount} pieces and unchoked {InfoHash}; super-seeding: {SuperSeedEnabled}; active peer-wire peers: {ActivePeerCount}.",
                 torrent.PieceCount,
-                torrent.InfoHashHex);
+                torrent.InfoHashHex,
+                superSeedEnabled,
+                peerLease.ActivePeerCount);
 
-            await RunMessageLoopAsync(stream, torrent, state, cancellationToken);
+            await RunMessageLoopAsync(stream, torrent, state, superSeedSession, cancellationToken);
             logger.LogDebug("Peer-wire message loop ended for {InfoHash}.", torrent.InfoHashHex);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -74,9 +94,19 @@ public sealed class PeerWireConnectionHandler(
         }
         finally
         {
+            if (superSeedSession is not null)
+                await superSeedSession.DisposeAsync();
+
+            if (peerLease is not null)
+                await peerLease.DisposeAsync();
+
             await state.DisposeAsync();
         }
     }
+
+    static bool ShouldUseSuperSeed(PeerWireSuperSeedOptions superSeed, int activePeerCount)
+        => superSeed.Enabled
+            && (superSeed.MinimumPeerCount == 0 || activePeerCount >= superSeed.MinimumPeerCount);
 
     async Task<PeerWireHandshake?> ReadHandshakeAsync(Stream stream, CancellationToken cancellationToken)
     {
@@ -106,6 +136,7 @@ public sealed class PeerWireConnectionHandler(
         Stream stream,
         PeerWireTorrentContext torrent,
         PeerWireSessionState state,
+        PeerWireSuperSeedSession? superSeed,
         CancellationToken cancellationToken)
     {
         var lengthPrefix = new byte[4];
@@ -153,6 +184,26 @@ public sealed class PeerWireConnectionHandler(
                     if (payloadLength > 0 && !await DrainAsync(stream, payloadLength, idleTimeout, cancellationToken))
                         return;
                     break;
+                case PeerWireMessageId.Have when payloadLength == 4:
+                    var havePayload = new byte[4];
+                    if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, havePayload, idleTimeout, cancellationToken))
+                        return;
+
+                    var havePiece = BinaryPrimitives.ReadInt32BigEndian(havePayload);
+                    logger.LogDebug(
+                        "Peer-wire have received for {InfoHash}: piece {PieceIndex}.",
+                        torrent.InfoHashHex,
+                        havePiece);
+
+                    if (superSeed is not null)
+                        await WriteHaveMessagesAsync(stream, superSeed.MarkHave(havePiece), cancellationToken);
+                    break;
+                case PeerWireMessageId.Have:
+                    logger.LogDebug(
+                        "Peer-wire closing {InfoHash}: have payload length was {PayloadLength}, expected 4.",
+                        torrent.InfoHashHex,
+                        payloadLength);
+                    return;
                 case PeerWireMessageId.Request when payloadLength == 12:
                     var payload = new byte[12];
                     if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, payload, idleTimeout, cancellationToken))
@@ -185,7 +236,24 @@ public sealed class PeerWireConnectionHandler(
                         return;
                     }
 
+                    if (superSeed is not null && !superSeed.CanServe(request.PieceIndex))
+                    {
+                        logger.LogDebug(
+                            "Peer-wire closing {InfoHash}: super-seed peer requested unadvertised piece {PieceIndex}.",
+                            torrent.InfoHashHex,
+                            request.PieceIndex);
+                        return;
+                    }
+
                     await WritePieceAsync(stream, torrent, state, request, cancellationToken);
+                    if (superSeed is not null)
+                    {
+                        var pieceLength = GetPieceLength(torrent, request.PieceIndex);
+                        await WriteHaveMessagesAsync(
+                            stream,
+                            superSeed.MarkBlockServed(request, pieceLength),
+                            cancellationToken);
+                    }
                     break;
                 case PeerWireMessageId.Request:
                     logger.LogDebug(
@@ -392,6 +460,22 @@ public sealed class PeerWireConnectionHandler(
         await WriteMessageAsync(stream, PeerWireMessageId.Bitfield, bitfield, cancellationToken);
     }
 
+    static async Task WriteHaveMessagesAsync(
+        Stream stream,
+        IReadOnlyList<int> pieceIndexes,
+        CancellationToken cancellationToken)
+    {
+        foreach (var pieceIndex in pieceIndexes)
+            await WriteHaveAsync(stream, pieceIndex, cancellationToken);
+    }
+
+    static async Task WriteHaveAsync(Stream stream, int pieceIndex, CancellationToken cancellationToken)
+    {
+        var payload = new byte[4];
+        BinaryPrimitives.WriteInt32BigEndian(payload, pieceIndex);
+        await WriteMessageAsync(stream, PeerWireMessageId.Have, payload, cancellationToken);
+    }
+
     async Task WritePieceAsync(
         Stream stream,
         PeerWireTorrentContext torrent,
@@ -434,6 +518,15 @@ public sealed class PeerWireConnectionHandler(
 
         await using var content = await torrent.Source.OpenRangeAsync(torrent.SourcePath, request.Offset, request.Length, cancellationToken);
         await ReadContentExactlyAsync(content, buffer, torrent.SourcePath, cancellationToken);
+    }
+
+    static int GetPieceLength(PeerWireTorrentContext torrent, int pieceIndex)
+    {
+        if (pieceIndex < torrent.PieceCount - 1)
+            return torrent.PieceLength;
+
+        var finalPieceLength = torrent.ContentLength - (long)pieceIndex * torrent.PieceLength;
+        return checked((int)finalPieceLength);
     }
 
     static async Task ReadContentExactlyAsync(
