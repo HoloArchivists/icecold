@@ -95,6 +95,11 @@ public sealed class PeerWireOptionsTests
                     Enabled = true,
                     MinimumPeerCount = -1,
                     MaxPiecesPerPeer = 0
+                },
+                Standby = new PeerWireStandbyOptions
+                {
+                    Enabled = true,
+                    MinimumExternalSeeders = 0
                 }
             }
         });
@@ -102,5 +107,6 @@ public sealed class PeerWireOptionsTests
         Assert.True(result.Failed);
         Assert.Contains("Icecold:PeerWire:SuperSeed:MaxPiecesPerPeer must be between 1 and 64.", result.Failures);
         Assert.Contains("Icecold:PeerWire:SuperSeed:MinimumPeerCount must be between 0 and 100000.", result.Failures);
+        Assert.Contains("Icecold:PeerWire:Standby:MinimumExternalSeeders must be between 1 and 100000.", result.Failures);
     }
 }

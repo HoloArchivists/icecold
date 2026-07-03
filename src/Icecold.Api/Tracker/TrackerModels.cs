@@ -29,6 +29,8 @@ public sealed record TrackerAnnounceResult(
 
 public sealed record TrackerScrapeStats(int Complete, int Incomplete, long Downloaded);
 
+public sealed record TrackerSwarmStats(int Seeders, int Leechers);
+
 public sealed record TrackerScrapeEntry(byte[] InfoHash, TrackerScrapeStats Stats);
 
 public sealed record TrackerScrapeResult(IReadOnlyList<TrackerScrapeEntry> Files);

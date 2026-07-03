@@ -7,12 +7,13 @@ namespace Icecold.Api.PeerWire;
 
 public sealed class PeerWireAdvertisedPeerProvider(
     IOptions<IcecoldOptions> options,
-    PeerWirePeerIdentity identity)
+    PeerWirePeerIdentity identity,
+    PeerWireStandbyPolicy standbyPolicy)
 {
-    public bool TryGetPeer(out PeerSnapshot peer)
+    public bool TryGetPeer(TrackerSwarmStats externalSwarm, out PeerSnapshot peer)
     {
         var peerWire = options.Value.PeerWire;
-        if (peerWire.Enabled && IPAddress.TryParse(peerWire.AdvertisedIp, out var ipAddress))
+        if (standbyPolicy.ShouldSeed(externalSwarm) && IPAddress.TryParse(peerWire.AdvertisedIp, out var ipAddress))
         {
             peer = new PeerSnapshot(identity.PeerId, ipAddress, peerWire.AdvertisedPort, 0);
             return true;

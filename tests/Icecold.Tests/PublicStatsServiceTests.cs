@@ -138,7 +138,12 @@ public sealed class PublicStatsServiceTests : IDisposable
         });
 
     static InMemoryTrackerPeerStore CreatePeerStore(IOptions<IcecoldOptions> options)
-        => new(options, new PeerWireAdvertisedPeerProvider(options, new PeerWirePeerIdentity()));
+        => new(
+            options,
+            new PeerWireAdvertisedPeerProvider(
+                options,
+                new PeerWirePeerIdentity(),
+                new PeerWireStandbyPolicy(options)));
 
     static TrackerAnnounceInput CreateAnnounce(
         string infoHash,

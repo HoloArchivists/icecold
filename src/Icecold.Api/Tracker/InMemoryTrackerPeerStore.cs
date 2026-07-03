@@ -55,10 +55,9 @@ public sealed class InMemoryTrackerPeerStore(
 
             EvictOverLimit(peers, trackerOptions.MaxPeersStoredPerTorrent);
 
-            var existingComplete = peers.Values.Count(p => p.Left == 0);
-            var existingIncomplete = peers.Count - existingComplete;
-            var hasAdvertisedPeer = advertisedPeerProvider.TryGetPeer(out var advertisedPeer);
-            var complete = existingComplete + (hasAdvertisedPeer ? 1 : 0);
+            var externalSwarm = GetSwarmStats(peers);
+            var hasAdvertisedPeer = advertisedPeerProvider.TryGetPeer(externalSwarm, out var advertisedPeer);
+            var complete = externalSwarm.Seeders + (hasAdvertisedPeer ? 1 : 0);
             var selected = new List<PeerSnapshot>(Math.Min(maxPeers, peers.Count + 1));
             if (hasAdvertisedPeer && maxPeers > 0)
                 selected.Add(advertisedPeer);
@@ -72,7 +71,7 @@ public sealed class InMemoryTrackerPeerStore(
             if (peers.Count == 0)
                 torrents.Remove(input.InfoHashHex);
 
-            return new TrackerAnnounceResult(selected, complete, existingIncomplete, interval, minInterval);
+            return new TrackerAnnounceResult(selected, complete, externalSwarm.Leechers, interval, minInterval);
         }
     }
 
@@ -93,11 +92,31 @@ public sealed class InMemoryTrackerPeerStore(
                     torrents.Remove(infoHashHex);
             }
 
-            var existingComplete = peers.Values.Count(p => p.Left == 0);
-            var existingIncomplete = peers.Count - existingComplete;
-            var hasAdvertisedPeer = advertisedPeerProvider.TryGetPeer(out _);
-            var complete = existingComplete + (hasAdvertisedPeer ? 1 : 0);
-            return new TrackerScrapeStats(complete, existingIncomplete, completedCounts.GetValueOrDefault(infoHashHex));
+            var externalSwarm = GetSwarmStats(peers);
+            var hasAdvertisedPeer = advertisedPeerProvider.TryGetPeer(externalSwarm, out _);
+            var complete = externalSwarm.Seeders + (hasAdvertisedPeer ? 1 : 0);
+            return new TrackerScrapeStats(complete, externalSwarm.Leechers, completedCounts.GetValueOrDefault(infoHashHex));
+        }
+    }
+
+    public TrackerSwarmStats GetSwarmStats(string infoHashHex)
+    {
+        var timeout = TimeSpan.FromSeconds(options.Value.Tracker.PeerTimeoutSeconds);
+        var now = DateTimeOffset.UtcNow;
+
+        lock (gate)
+        {
+            if (!torrents.TryGetValue(infoHashHex, out var peers))
+                return new TrackerSwarmStats(0, 0);
+
+            Expire(peers, now, timeout);
+            if (peers.Count == 0)
+            {
+                torrents.Remove(infoHashHex);
+                return new TrackerSwarmStats(0, 0);
+            }
+
+            return GetSwarmStats(peers);
         }
     }
 
@@ -174,6 +193,12 @@ public sealed class InMemoryTrackerPeerStore(
         {
             peers.Remove(key);
         }
+    }
+
+    static TrackerSwarmStats GetSwarmStats(Dictionary<string, PeerEntry> peers)
+    {
+        var seeders = peers.Values.Count(p => p.Left == 0);
+        return new TrackerSwarmStats(seeders, peers.Count - seeders);
     }
 
     static string BuildPeerKey(TrackerAnnounceInput input)

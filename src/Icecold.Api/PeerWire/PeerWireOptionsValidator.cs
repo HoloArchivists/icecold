@@ -46,6 +46,9 @@ public sealed class PeerWireOptionsValidator : IValidateOptions<IcecoldOptions>
         if (peerWire.SuperSeed.MinimumPeerCount is < 0 or > 100000)
             failures.Add("Icecold:PeerWire:SuperSeed:MinimumPeerCount must be between 0 and 100000.");
 
+        if (peerWire.Standby.MinimumExternalSeeders is < 1 or > 100000)
+            failures.Add("Icecold:PeerWire:Standby:MinimumExternalSeeders must be between 1 and 100000.");
+
         return failures.Count == 0
             ? ValidateOptionsResult.Success
             : ValidateOptionsResult.Fail(failures);

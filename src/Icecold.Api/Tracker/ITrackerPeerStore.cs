@@ -5,4 +5,6 @@ public interface ITrackerPeerStore
     TrackerAnnounceResult Announce(TrackerAnnounceInput input);
 
     TrackerScrapeStats Scrape(string infoHashHex);
+
+    TrackerSwarmStats GetSwarmStats(string infoHashHex);
 }

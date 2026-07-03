@@ -70,6 +70,8 @@ public sealed class PeerWireOptions
 
     public PeerWireSuperSeedOptions SuperSeed { get; set; } = new();
 
+    public PeerWireStandbyOptions Standby { get; set; } = new();
+
     public string BindAddress { get; set; } = "0.0.0.0";
 
     public int ListenPort { get; set; } = 6881;
@@ -96,6 +98,13 @@ public sealed class PeerWireSuperSeedOptions
     public int MinimumPeerCount { get; set; }
 
     public int MaxPiecesPerPeer { get; set; } = 1;
+}
+
+public sealed class PeerWireStandbyOptions
+{
+    public bool Enabled { get; set; }
+
+    public int MinimumExternalSeeders { get; set; } = 1;
 }
 
 public sealed class ContentSourceOptions

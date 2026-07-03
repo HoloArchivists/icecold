@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using Icecold.Api.Content;
 using Icecold.Api.Options;
 using Icecold.Api.Torrents;
+using Icecold.Api.Tracker;
 using Microsoft.Extensions.Options;
 
 namespace Icecold.Api.PeerWire;
@@ -11,6 +12,8 @@ public sealed class PeerWireConnectionHandler(
     PeerWireTorrentResolver torrents,
     PeerWirePeerIdentity identity,
     PeerWireSuperSeedCoordinator superSeedCoordinator,
+    ITrackerPeerStore peerStore,
+    PeerWireStandbyPolicy standbyPolicy,
     IOptions<IcecoldOptions> options,
     ILogger<PeerWireConnectionHandler> logger)
 {
@@ -46,6 +49,12 @@ public sealed class PeerWireConnectionHandler(
             if (torrent is null)
             {
                 logger.LogDebug("Peer-wire connection requested unknown or unavailable torrent {InfoHash}.", infoHashHex);
+                return;
+            }
+
+            if (!ShouldServe(torrent))
+            {
+                logger.LogDebug("Peer-wire standing down for {InfoHash}: enough external seeders are available.", torrent.InfoHashHex);
                 return;
             }
 
@@ -107,6 +116,9 @@ public sealed class PeerWireConnectionHandler(
     static bool ShouldUseSuperSeed(PeerWireSuperSeedOptions superSeed, int activePeerCount)
         => superSeed.Enabled
             && (superSeed.MinimumPeerCount == 0 || activePeerCount >= superSeed.MinimumPeerCount);
+
+    bool ShouldServe(PeerWireTorrentContext torrent)
+        => standbyPolicy.ShouldSeed(peerStore.GetSwarmStats(torrent.InfoHashHex));
 
     async Task<PeerWireHandshake?> ReadHandshakeAsync(Stream stream, CancellationToken cancellationToken)
     {
@@ -209,6 +221,12 @@ public sealed class PeerWireConnectionHandler(
                     if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, payload, idleTimeout, cancellationToken))
                         return;
 
+                    if (!ShouldServe(torrent))
+                    {
+                        logger.LogDebug("Peer-wire closing {InfoHash}: swarm has enough external seeders.", torrent.InfoHashHex);
+                        return;
+                    }
+
                     var pieceIndex = BinaryPrimitives.ReadInt32BigEndian(payload.AsSpan(0, 4));
                     var begin = BinaryPrimitives.ReadInt32BigEndian(payload.AsSpan(4, 4));
                     var length = BinaryPrimitives.ReadInt32BigEndian(payload.AsSpan(8, 4));
@@ -265,6 +283,12 @@ public sealed class PeerWireConnectionHandler(
                     var extendedPayload = new byte[payloadLength];
                     if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, extendedPayload, idleTimeout, cancellationToken))
                         return;
+
+                    if (!ShouldServe(torrent))
+                    {
+                        logger.LogDebug("Peer-wire closing {InfoHash}: swarm has enough external seeders.", torrent.InfoHashHex);
+                        return;
+                    }
 
                     await HandleExtendedMessageAsync(stream, torrent, state, extendedPayload, cancellationToken);
                     break;

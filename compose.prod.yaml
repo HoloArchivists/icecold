@@ -13,17 +13,7 @@ services:
       Icecold__PublicBaseUrl: ${ICECOLD_PUBLIC_BASE_URL:?ICECOLD_PUBLIC_BASE_URL is required}
       Icecold__AdminApiKey: ${ICECOLD_ADMIN_API_KEY:?ICECOLD_ADMIN_API_KEY is required}
       Icecold__Database__AutoMigrate: ${ICECOLD_AUTO_MIGRATE:-true}
-      Icecold__WebSeed__Enabled: ${ICECOLD_WEBSEED_ENABLED:-true}
-      Icecold__WebSeed__PublicBaseUrl: ${ICECOLD_WEBSEED_PUBLIC_BASE_URL:-}
-      Icecold__PeerWire__Enabled: ${ICECOLD_PEERWIRE_ENABLED:-true}
-      Icecold__PeerWire__SuperSeed__Enabled: ${ICECOLD_PEERWIRE_SUPERSEED_ENABLED:-false}
-      Icecold__PeerWire__SuperSeed__MinimumPeerCount: ${ICECOLD_PEERWIRE_SUPERSEED_MINIMUM_PEER_COUNT:-0}
-      Icecold__PeerWire__SuperSeed__MaxPiecesPerPeer: ${ICECOLD_PEERWIRE_SUPERSEED_MAX_PIECES_PER_PEER:-1}
-      Icecold__PeerWire__BindAddress: 0.0.0.0
-      Icecold__PeerWire__ListenPort: 6881
-      Icecold__PeerWire__AdvertisedIp: ${ICECOLD_PEERWIRE_ADVERTISED_IP:-}
-      Icecold__PeerWire__AdvertisedPort: ${ICECOLD_PEERWIRE_ADVERTISED_PORT:-6881}
-      Icecold__ContentSources__0__Name: ${ICECOLD_CONTENT_SOURCE_NAME:-local}
+      Icecold__ContentSources__0__Name: local
       Icecold__ContentSources__0__Type: local
       Icecold__ContentSources__0__RootPath: /data/files
     ports:

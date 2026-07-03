@@ -7,6 +7,7 @@ using Icecold.Api.Data;
 using Icecold.Api.Options;
 using Icecold.Api.PeerWire;
 using Icecold.Api.Torrents;
+using Icecold.Api.Tracker;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -85,12 +86,9 @@ public sealed class PeerWireTests : IDisposable
             .BuildSingleFileAsync(metadata, source, null, CancellationToken.None);
         await using var db = CreateDb(torrentResult, metadata);
         await using var provider = CreateProvider(db);
-        var handler = new PeerWireConnectionHandler(
-            CreateResolver(provider),
-            new PeerWirePeerIdentity(),
-            new PeerWireSuperSeedCoordinator(),
-            Options.Create(new IcecoldOptions { PeerWire = new PeerWireOptions { Enabled = true, MaxBlockLength = 16 * 1024 } }),
-            NullLogger<PeerWireConnectionHandler>.Instance);
+        var handler = CreateHandler(
+            provider,
+            new IcecoldOptions { PeerWire = new PeerWireOptions { Enabled = true, MaxBlockLength = 16 * 1024 } });
         await using var stream = new DuplexTestStream();
         var peerId = Enumerable.Repeat((byte)'P', 20).ToArray();
 
@@ -124,6 +122,95 @@ public sealed class PeerWireTests : IDisposable
     }
 
     [Fact]
+    public async Task Handler_Standby_Closes_Before_Advertising_When_Enough_External_Seeders_Exist()
+    {
+        var content = Encoding.ASCII.GetBytes("hello standby");
+        await File.WriteAllBytesAsync(Path.Combine(root, "payload.bin"), content);
+        var source = new LocalFileContentSource("local", root);
+        var metadata = await source.GetMetadataAsync("payload.bin", CancellationToken.None);
+        var torrentResult = await new TorrentBuilder(new PublicUrlBuilder(Options.Create(new IcecoldOptions { PublicBaseUrl = "http://example.test" })))
+            .BuildSingleFileAsync(metadata, source, null, CancellationToken.None);
+        await using var db = CreateDb(torrentResult, metadata);
+        await using var provider = CreateProvider(db);
+        var options = new IcecoldOptions
+        {
+            PeerWire = new PeerWireOptions
+            {
+                Enabled = true,
+                MaxBlockLength = 16 * 1024,
+                Standby = new PeerWireStandbyOptions
+                {
+                    Enabled = true,
+                    MinimumExternalSeeders = 1
+                }
+            }
+        };
+        var peerStore = CreatePeerStore(Options.Create(options));
+        AnnounceSeeder(peerStore, torrentResult.InfoHashHex, 9);
+        var handler = CreateHandler(provider, options, peerStore: peerStore);
+        await using var stream = new DuplexTestStream();
+
+        await stream.WriteClientAsync(BuildHandshake(
+            Convert.FromHexString(torrentResult.InfoHashHex),
+            Enumerable.Repeat((byte)'W', 20).ToArray()));
+        await handler.HandleAsync(stream.ServerStream, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2));
+        await stream.ServerStream.DisposeAsync();
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        Assert.Equal(0, await stream.ClientStream.ReadAsync(new byte[1], timeout.Token));
+    }
+
+    [Fact]
+    public async Task Handler_Standby_Stops_Uploading_When_External_Seeder_Appears()
+    {
+        var content = Encoding.ASCII.GetBytes("hello standby stop");
+        await File.WriteAllBytesAsync(Path.Combine(root, "payload.bin"), content);
+        var source = new LocalFileContentSource("local", root);
+        var metadata = await source.GetMetadataAsync("payload.bin", CancellationToken.None);
+        var torrentResult = await new TorrentBuilder(new PublicUrlBuilder(Options.Create(new IcecoldOptions { PublicBaseUrl = "http://example.test" })))
+            .BuildSingleFileAsync(metadata, source, null, CancellationToken.None);
+        await using var db = CreateDb(torrentResult, metadata);
+        await using var provider = CreateProvider(db);
+        var options = new IcecoldOptions
+        {
+            PeerWire = new PeerWireOptions
+            {
+                Enabled = true,
+                MaxBlockLength = 16 * 1024,
+                Standby = new PeerWireStandbyOptions
+                {
+                    Enabled = true,
+                    MinimumExternalSeeders = 1
+                }
+            }
+        };
+        var peerStore = CreatePeerStore(Options.Create(options));
+        var handler = CreateHandler(provider, options, peerStore: peerStore);
+        await using var stream = new DuplexTestStream();
+
+        await stream.WriteClientAsync(BuildHandshake(
+            Convert.FromHexString(torrentResult.InfoHashHex),
+            Enumerable.Repeat((byte)'Q', 20).ToArray()));
+        var handling = handler.HandleAsync(stream.ServerStream, CancellationToken.None);
+
+        _ = await stream.ReadClientAsync(68);
+        var bitfield = await ReadMessageAsync(stream);
+        Assert.Equal(5, bitfield.Id);
+
+        var unchoke = await ReadMessageAsync(stream);
+        Assert.Equal(1, unchoke.Id);
+
+        AnnounceSeeder(peerStore, torrentResult.InfoHashHex, 9);
+        await stream.WriteClientAsync(BuildInterested());
+        await stream.WriteClientAsync(BuildRequest(pieceIndex: 0, begin: 0, length: 4));
+
+        await handling.WaitAsync(TimeSpan.FromSeconds(2));
+        await stream.ServerStream.DisposeAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        Assert.Equal(0, await stream.ClientStream.ReadAsync(new byte[1], timeout.Token));
+    }
+
+    [Fact]
     public async Task Handler_SuperSeeds_One_Piece_At_A_Time()
     {
         var content = Enumerable.Range(0, 300 * 1024).Select(i => (byte)(i % 251)).ToArray();
@@ -134,11 +221,9 @@ public sealed class PeerWireTests : IDisposable
             .BuildSingleFileAsync(metadata, source, null, CancellationToken.None);
         await using var db = CreateDb(torrentResult, metadata);
         await using var provider = CreateProvider(db);
-        var handler = new PeerWireConnectionHandler(
-            CreateResolver(provider),
-            new PeerWirePeerIdentity(),
-            new PeerWireSuperSeedCoordinator(),
-            Options.Create(new IcecoldOptions
+        var handler = CreateHandler(
+            provider,
+            new IcecoldOptions
             {
                 PeerWire = new PeerWireOptions
                 {
@@ -150,8 +235,7 @@ public sealed class PeerWireTests : IDisposable
                         MaxPiecesPerPeer = 1
                     }
                 }
-            }),
-            NullLogger<PeerWireConnectionHandler>.Instance);
+            });
         await using var stream = new DuplexTestStream();
         var peerId = Enumerable.Repeat((byte)'S', 20).ToArray();
 
@@ -196,11 +280,9 @@ public sealed class PeerWireTests : IDisposable
         await using var db = CreateDb(torrentResult, metadata);
         await using var provider = CreateProvider(db);
         var coordinator = new PeerWireSuperSeedCoordinator();
-        var handler = new PeerWireConnectionHandler(
-            CreateResolver(provider),
-            new PeerWirePeerIdentity(),
-            coordinator,
-            Options.Create(new IcecoldOptions
+        var handler = CreateHandler(
+            provider,
+            new IcecoldOptions
             {
                 PeerWire = new PeerWireOptions
                 {
@@ -213,8 +295,8 @@ public sealed class PeerWireTests : IDisposable
                         MaxPiecesPerPeer = 1
                     }
                 }
-            }),
-            NullLogger<PeerWireConnectionHandler>.Instance);
+            },
+            coordinator);
         await using var first = new DuplexTestStream();
         await using var second = new DuplexTestStream();
 
@@ -259,12 +341,9 @@ public sealed class PeerWireTests : IDisposable
             .BuildSingleFileAsync(metadata, source, null, CancellationToken.None);
         await using var db = CreateDb(torrentResult, metadata);
         await using var provider = CreateProvider(db);
-        var handler = new PeerWireConnectionHandler(
-            CreateResolver(provider),
-            new PeerWirePeerIdentity(),
-            new PeerWireSuperSeedCoordinator(),
-            Options.Create(new IcecoldOptions { PeerWire = new PeerWireOptions { Enabled = true, MaxBlockLength = 16 * 1024 } }),
-            NullLogger<PeerWireConnectionHandler>.Instance);
+        var handler = CreateHandler(
+            provider,
+            new IcecoldOptions { PeerWire = new PeerWireOptions { Enabled = true, MaxBlockLength = 16 * 1024 } });
         var negotiator = CreateTransportNegotiator(provider);
         await using var stream = new DuplexTestStream();
         var peerId = Enumerable.Repeat((byte)'E', 20).ToArray();
@@ -317,12 +396,9 @@ public sealed class PeerWireTests : IDisposable
         var infoBytes = GetInfoBytes(torrentResult.TorrentBytes);
         await using var db = CreateDb(torrentResult, metadata);
         await using var provider = CreateProvider(db);
-        var handler = new PeerWireConnectionHandler(
-            CreateResolver(provider),
-            new PeerWirePeerIdentity(),
-            new PeerWireSuperSeedCoordinator(),
-            Options.Create(new IcecoldOptions { PeerWire = new PeerWireOptions { Enabled = true, MaxBlockLength = 16 * 1024 } }),
-            NullLogger<PeerWireConnectionHandler>.Instance);
+        var handler = CreateHandler(
+            provider,
+            new IcecoldOptions { PeerWire = new PeerWireOptions { Enabled = true, MaxBlockLength = 16 * 1024 } });
         await using var stream = new DuplexTestStream();
         var peerId = Enumerable.Repeat((byte)'M', 20).ToArray();
 
@@ -374,12 +450,9 @@ public sealed class PeerWireTests : IDisposable
         await File.WriteAllTextAsync(Path.Combine(root, "payload.bin"), "hello");
         await using var db = CreateEmptyDb();
         await using var provider = CreateProvider(db);
-        var handler = new PeerWireConnectionHandler(
-            CreateResolver(provider),
-            new PeerWirePeerIdentity(),
-            new PeerWireSuperSeedCoordinator(),
-            Options.Create(new IcecoldOptions { PeerWire = new PeerWireOptions { Enabled = true } }),
-            NullLogger<PeerWireConnectionHandler>.Instance);
+        var handler = CreateHandler(
+            provider,
+            new IcecoldOptions { PeerWire = new PeerWireOptions { Enabled = true } });
         await using var stream = new DuplexTestStream();
 
         await stream.WriteClientAsync(BuildHandshake(Enumerable.Repeat((byte)1, 20).ToArray(), Enumerable.Repeat((byte)2, 20).ToArray()));
@@ -395,11 +468,9 @@ public sealed class PeerWireTests : IDisposable
     {
         await using var db = CreateEmptyDb();
         await using var provider = CreateProvider(db);
-        var handler = new PeerWireConnectionHandler(
-            CreateResolver(provider),
-            new PeerWirePeerIdentity(),
-            new PeerWireSuperSeedCoordinator(),
-            Options.Create(new IcecoldOptions
+        var handler = CreateHandler(
+            provider,
+            new IcecoldOptions
             {
                 PeerWire = new PeerWireOptions
                 {
@@ -407,8 +478,7 @@ public sealed class PeerWireTests : IDisposable
                     HandshakeTimeoutSeconds = 1,
                     IdleTimeoutSeconds = 120
                 }
-            }),
-            NullLogger<PeerWireConnectionHandler>.Instance);
+            });
         await using var stream = new StallingReadStream([]);
 
         await handler.HandleAsync(stream, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3));
@@ -425,11 +495,9 @@ public sealed class PeerWireTests : IDisposable
             .BuildSingleFileAsync(metadata, source, null, CancellationToken.None);
         await using var db = CreateDb(torrentResult, metadata);
         await using var provider = CreateProvider(db);
-        var handler = new PeerWireConnectionHandler(
-            CreateResolver(provider),
-            new PeerWirePeerIdentity(),
-            new PeerWireSuperSeedCoordinator(),
-            Options.Create(new IcecoldOptions
+        var handler = CreateHandler(
+            provider,
+            new IcecoldOptions
             {
                 PeerWire = new PeerWireOptions
                 {
@@ -438,8 +506,7 @@ public sealed class PeerWireTests : IDisposable
                     HandshakeTimeoutSeconds = 1,
                     IdleTimeoutSeconds = 1
                 }
-            }),
-            NullLogger<PeerWireConnectionHandler>.Instance);
+            });
         await using var stream = new StallingReadStream(
             BuildHandshake(Convert.FromHexString(torrentResult.InfoHashHex), Enumerable.Repeat((byte)'I', 20).ToArray()));
 
@@ -522,6 +589,46 @@ public sealed class PeerWireTests : IDisposable
             CreateResolver(provider),
             Options.Create(new IcecoldOptions { PeerWire = new PeerWireOptions() }),
             NullLogger<PeerWireTransportNegotiator>.Instance);
+
+    PeerWireConnectionHandler CreateHandler(
+        ServiceProvider provider,
+        IcecoldOptions options,
+        PeerWireSuperSeedCoordinator? superSeedCoordinator = null,
+        ITrackerPeerStore? peerStore = null)
+    {
+        var wrappedOptions = Options.Create(options);
+        return new PeerWireConnectionHandler(
+            CreateResolver(provider),
+            new PeerWirePeerIdentity(),
+            superSeedCoordinator ?? new PeerWireSuperSeedCoordinator(),
+            peerStore ?? CreatePeerStore(wrappedOptions),
+            new PeerWireStandbyPolicy(wrappedOptions),
+            wrappedOptions,
+            NullLogger<PeerWireConnectionHandler>.Instance);
+    }
+
+    static InMemoryTrackerPeerStore CreatePeerStore(IOptions<IcecoldOptions> options)
+        => new(
+            options,
+            new PeerWireAdvertisedPeerProvider(
+                options,
+                new PeerWirePeerIdentity(),
+                new PeerWireStandbyPolicy(options)));
+
+    static void AnnounceSeeder(InMemoryTrackerPeerStore peerStore, string infoHashHex, byte peerId)
+    {
+        _ = peerStore.Announce(new TrackerAnnounceInput(
+            infoHashHex,
+            Enumerable.Repeat(peerId, 20).ToArray(),
+            IPAddress.Parse($"127.0.0.{peerId}"),
+            6880 + peerId,
+            0,
+            0,
+            0,
+            "started",
+            true,
+            50));
+    }
 
     PeerWireTorrentResolver CreateResolver(ServiceProvider provider)
     {

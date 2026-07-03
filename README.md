@@ -52,24 +52,16 @@ POSTGRES_PASSWORD=replace-with-a-long-random-password
 ICECOLD_ADMIN_API_KEY=replace-with-a-long-random-admin-key
 ICECOLD_PUBLIC_BASE_URL=https://icecold.example.org
 ICECOLD_CONTENT_ROOT=/srv/archive/files
+
+# Optional Docker/runtime settings
 ICECOLD_HTTP_PORT=8080
-ICECOLD_WEBSEED_ENABLED=true
-# Optional: use a different public origin for advertised webseed URLs, for example a CDN.
-ICECOLD_WEBSEED_PUBLIC_BASE_URL=
-ICECOLD_PEERWIRE_ENABLED=true
-ICECOLD_PEERWIRE_SUPERSEED_ENABLED=false
-ICECOLD_PEERWIRE_SUPERSEED_MINIMUM_PEER_COUNT=0
-ICECOLD_PEERWIRE_SUPERSEED_MAX_PIECES_PER_PEER=1
-ICECOLD_PEERWIRE_ADVERTISED_IP=203.0.113.10
 ICECOLD_PEERWIRE_PORT=6881
-ICECOLD_PEERWIRE_ADVERTISED_PORT=6881
 ICECOLD_IMAGE_TAG=latest
-# Optional: run the API container as a host user that can read ICECOLD_CONTENT_ROOT.
 ICECOLD_UID=1000
 ICECOLD_GID=1000
 ```
 
-`POSTGRES_PASSWORD`, `ICECOLD_ADMIN_API_KEY`, `ICECOLD_PUBLIC_BASE_URL`, and `ICECOLD_CONTENT_ROOT` are required. If peer-wire is enabled, `ICECOLD_PEERWIRE_ADVERTISED_IP` is also required and must be an IP — BitTorrent compact peer responses can't carry a DNS name. Set `ICECOLD_UID`/`ICECOLD_GID` if the container needs a specific host identity to read the content root.
+`POSTGRES_PASSWORD`, `ICECOLD_ADMIN_API_KEY`, `ICECOLD_PUBLIC_BASE_URL`, and `ICECOLD_CONTENT_ROOT` are required. Set `ICECOLD_UID`/`ICECOLD_GID` if the container needs a specific host identity to read the content root.
 
 ### Start
 
@@ -81,8 +73,7 @@ docker compose -f compose.prod.yaml up -d
 
 - `ICECOLD_CONTENT_ROOT` is mounted read-only at `/data/files` inside the container.
 - Set `ICECOLD_AUTO_MIGRATE=false` to manage database migrations separately.
-- Set `ICECOLD_WEBSEED_ENABLED=false` for peer-wire-only serving, or `ICECOLD_PEERWIRE_ENABLED=false` for webseed-only serving. Icecold refuses to start if both are disabled.
-- Set `ICECOLD_WEBSEED_PUBLIC_BASE_URL` when `.torrent` files and magnets should advertise webseed URLs through a CDN or different reverse-proxy origin. Leave it empty to use `ICECOLD_PUBLIC_BASE_URL`.
+- `compose.prod.yaml` only maps deployment essentials. Use a Compose override for app-level settings such as peer-wire, webseed, super-seeding, standby mode, indexing concurrency, and tracker limits.
 - For internet-facing deployments, put Icecold behind a reverse proxy that terminates TLS. If peer-wire is enabled, it uses plain TCP on `ICECOLD_PEERWIRE_PORT` and must be reachable directly by BitTorrent clients.
 
 ## API
@@ -154,47 +145,59 @@ Adding a location hashes the file and only accepts it if it produces the same in
 
 ## Configuration
 
-Settings live under `Icecold` in `appsettings.json`:
+The canonical option reference is [appsettings.json](src/Icecold.Api/appsettings.json). It lists the available settings and their defaults. For local development, `appsettings.Development.json` can override those values. For containers, use environment variables or a Compose override.
 
-| Key | Default | Description |
-|---|---|---|
-| `PublicBaseUrl` | — | Base URL embedded into tracker announce URLs and, when webseed is enabled, webseed metadata |
-| `AdminApiKey` | — | Required in the `X-Icecold-Admin-Key` header for all `/api/*` endpoints. Absent in base config — provide via environment variable or secret in production; `appsettings.Development.json` sets it to `dev-admin-key` |
-| `Database:AutoMigrate` | `false` | Run pending EF Core migrations automatically on startup. The production Compose file sets this via `ICECOLD_AUTO_MIGRATE` |
-| `Indexing:MaxConcurrency` | `1` | Number of parallel hashing workers processing the indexing queue |
-| `Indexing:QueueCapacity` | `10000` | Maximum pending indexing jobs held in memory before new submissions block |
-| `Tracker:AnnounceIntervalSeconds` | `1800` | Recommended reannounce interval returned to clients (30 min) |
-| `Tracker:MinAnnounceIntervalSeconds` | `300` | Minimum reannounce interval returned to clients (5 min) |
-| `Tracker:PeerTimeoutSeconds` | `2700` | Time after which a peer that has stopped announcing is removed from the in-memory store (45 min) |
-| `Tracker:MaxPeersReturned` | `200` | Maximum number of peers returned in a single announce response |
-| `Tracker:MaxPeersStoredPerTorrent` | `1000` | Maximum peers retained per infohash before evicting least-recently announced peers |
-| `Tracker:PruneIntervalSeconds` | `300` | Background pruning interval for expired peers and empty infohash buckets |
-| `Stats:Enabled` | `true` | Enable the public `/stats` endpoint |
-| `Stats:CacheSeconds` | `5` | Server-side cache duration for the public `/stats` response. Set to `0` to disable stats caching |
-| `WebSeed:Enabled` | `true` | Enable HTTP webseed serving and advertise `/webseed` URLs in `.torrent` files and magnet links. At least one of `WebSeed:Enabled` or `PeerWire:Enabled` must be true |
-| `WebSeed:PublicBaseUrl` | — | Optional public origin for advertised webseed URLs. Leave empty to use `PublicBaseUrl`; set it for a CDN or separate webseed reverse proxy |
-| `PeerWire:Enabled` | `false` | Enable the upload-only TCP peer-wire seeding listener. At least one of `WebSeed:Enabled` or `PeerWire:Enabled` must be true |
-| `PeerWire:SuperSeed:Enabled` | `false` | Enable initial/super-seeding behavior. When false, super-seeding is completely disabled |
-| `PeerWire:SuperSeed:MinimumPeerCount` | `0` | Minimum active peer-wire connections for an infohash before new connections use super-seeding. `0` means always super-seed when enabled |
-| `PeerWire:SuperSeed:MaxPiecesPerPeer` | `1` | Number of pieces to advertise to each peer at once while super-seeding |
-| `PeerWire:BindAddress` | `0.0.0.0` | Local IP to bind the listener; `0.0.0.0` listens on all interfaces |
-| `PeerWire:ListenPort` | `6881` | TCP port to accept incoming peer connections on |
-| `PeerWire:AdvertisedIp` | — | Public IP advertised in tracker responses. Must be an IP address — BitTorrent compact peer responses cannot carry DNS names. Required when `Enabled` is true |
-| `PeerWire:AdvertisedPort` | `6881` | Public port advertised in tracker responses. Can differ from `ListenPort` when behind NAT |
-| `PeerWire:MaxBlockLength` | `16384` | Maximum piece block size accepted from peers, in bytes (16 KiB is the BitTorrent standard) |
-| `PeerWire:MaxOutstandingRequests` | `8192` | Advertised as `reqq` in the extension handshake — how many requests a peer may pipeline |
-| `PeerWire:MaxConnections` | `128` | Maximum concurrent peer connections; new connections are rejected once this is reached |
-| `PeerWire:HandshakeTimeoutSeconds` | `15` | Timeout for completing the BitTorrent or MSE/RC4 handshake before dropping a connection |
-| `PeerWire:IdleTimeoutSeconds` | `120` | Timeout before an idle connection with no messages (including keepalives) is closed |
-| `ContentSources[].Name` | — | Unique source identifier (case-insensitive) used in indexing requests and stored with each torrent |
-| `ContentSources[].Type` | `local` | Source implementation type. Only `local` is supported; S3 and HTTP sources are not yet available |
-| `ContentSources[].RootPath` | — | Base directory for a local source. Relative paths are resolved from the application content root. If `ContentSources` is omitted entirely, a default `local` source is created at `{ContentRootPath}/data/files` |
+ASP.NET Core maps nested configuration keys by replacing `:` with double underscores:
+
+```text
+Icecold:PeerWire:Enabled
+Icecold__PeerWire__Enabled=true
+
+Icecold:PeerWire:Standby:MinimumExternalSeeders
+Icecold__PeerWire__Standby__MinimumExternalSeeders=2
+
+Icecold:ContentSources:0:RootPath
+Icecold__ContentSources__0__RootPath=/data/files
+
+ConnectionStrings:Icecold
+ConnectionStrings__Icecold=Host=postgres;Port=5432;Database=icecold;Username=icecold;Password=...
+```
+
+For production, put app-level customizations in a Compose override instead of adding more `ICECOLD_*` aliases to `.env`:
+
+```yaml
+# compose.prod.override.yaml
+services:
+  api:
+    environment:
+      Icecold__WebSeed__Enabled: "true"
+      Icecold__WebSeed__PublicBaseUrl: "https://cdn.example.org"
+      Icecold__PeerWire__Enabled: "true"
+      Icecold__PeerWire__AdvertisedIp: "203.0.113.10"
+      Icecold__PeerWire__AdvertisedPort: "6881"
+      Icecold__PeerWire__SuperSeed__Enabled: "true"
+      Icecold__PeerWire__SuperSeed__MinimumPeerCount: "3"
+      Icecold__PeerWire__Standby__Enabled: "true"
+      Icecold__PeerWire__Standby__MinimumExternalSeeders: "2"
+```
+
+Run with both files:
+
+```bash
+docker compose -f compose.prod.yaml -f compose.prod.override.yaml up -d
+```
+
+If peer-wire is enabled, `Icecold:PeerWire:AdvertisedIp` must be an IP address, not a hostname. BitTorrent compact peer responses cannot carry DNS names.
+
+Icecold refuses to start if both `Icecold:WebSeed:Enabled` and `Icecold:PeerWire:Enabled` are false.
 
 Super-seeding is intended for torrents with multiple leechers. With only one leecher, Icecold still makes progress by revealing the next piece after the current advertised piece has been fully uploaded, but throughput can be lower than normal peer-wire mode because the client only sees a small piece window. Threshold-based super-seeding only affects new peer-wire connections; a client that already received the full bitfield stays in normal mode until it reconnects.
 
+Swarm standby mode uses the built-in tracker's external seeder count, not total peers. Leechers with partial data do not make a torrent look healthy, so Icecold keeps advertising/uploading until enough non-Icecold peers announce `left=0`.
+
 ## Development
 
-The default [compose.yaml](compose.yaml) uses the .NET SDK image, mounts this repo at `/workspace`, applies EF migrations, and runs the API with `dotnet watch`. It enables both webseed and peer-wire serving by default.
+The default [compose.yaml](compose.yaml) uses the .NET SDK image, mounts this repo at `/workspace`, applies EF migrations, and runs the API with `dotnet watch`. App behavior comes from `appsettings.json`, `appsettings.Development.json`, and any local Compose override.
 
 ```bash
 docker compose up
@@ -210,7 +213,7 @@ The dev API is at `http://localhost:5038`. Swagger UI is at `http://localhost:50
 
 ### Peer-Wire
 
-For peer-wire testing through dev Compose, set `Icecold:PeerWire:AdvertisedIp` in `appsettings.Development.json` to an IP your torrent client can reach. Dev Compose enables the listener but leaves the advertised endpoint to app config.
+For peer-wire testing through dev Compose, enable peer-wire and set `Icecold:PeerWire:AdvertisedIp` in `appsettings.Development.json` or a local `compose.override.yaml`. The advertised IP must be reachable by your torrent client.
 
 Dev Compose uses a Debug build by default. For throughput testing, use the production image or run in Release mode:
 
