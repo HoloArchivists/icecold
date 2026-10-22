@@ -71,14 +71,29 @@ ICECOLD_PUBLIC_BASE_URL=https://icecold.example.org
 ICECOLD_CONTENT_ROOT=/srv/archive/files
 
 # Optional Docker/runtime settings
+ICECOLD_IMAGE_TAG=latest          # or a release tag such as 1.2.0
+ICECOLD_HTTP_BIND=127.0.0.1       # host address for the HTTP port; keep loopback behind a reverse proxy
 ICECOLD_HTTP_PORT=8080
+ICECOLD_UID=1654                  # host identity that can read ICECOLD_CONTENT_ROOT
+ICECOLD_GID=1654
+ICECOLD_ALLOWED_HOSTS=icecold.example.org
+ICECOLD_LOG_FORMAT=simple         # or json
+ICECOLD_AUTO_MIGRATE=true
+
+# Reverse proxy trust (enabled by default; trusts the Compose network gateway)
+ICECOLD_REVERSE_PROXY_ENABLED=true
+ICECOLD_NETWORK_SUBNET=172.31.250.0/24
+
+# Optional separate public origin for /webseed (for example a non-CDN hostname)
+ICECOLD_WEBSEED_PUBLIC_BASE_URL=
+
+# Peer-wire seeding
+ICECOLD_PEERWIRE_ENABLED=false
+ICECOLD_PEERWIRE_ADVERTISED_IP=   # public IP address, required when peer-wire is enabled
 ICECOLD_PEERWIRE_PORT=6881
-ICECOLD_IMAGE_TAG=latest
-ICECOLD_UID=1000
-ICECOLD_GID=1000
 ```
 
-`POSTGRES_PASSWORD`, `ICECOLD_ADMIN_API_KEY`, `ICECOLD_PUBLIC_BASE_URL`, and `ICECOLD_CONTENT_ROOT` are required. Set `ICECOLD_UID`/`ICECOLD_GID` if the container needs a specific host identity to read the content root.
+`POSTGRES_PASSWORD`, `ICECOLD_ADMIN_API_KEY`, `ICECOLD_PUBLIC_BASE_URL`, and `ICECOLD_CONTENT_ROOT` are required. The container runs as UID/GID 1654 (the .NET image's `app` user) unless `ICECOLD_UID`/`ICECOLD_GID` are set; pick an identity that can read the content root.
 
 ### Start
 
@@ -86,12 +101,41 @@ ICECOLD_GID=1000
 docker compose -f compose.prod.yaml up -d
 ```
 
+### Reverse Proxy
+
+The HTTP port is published on `127.0.0.1` by default. Terminate TLS in a reverse proxy on the host and forward to it. Compose pins the network to `ICECOLD_NETWORK_SUBNET`, and Icecold trusts `X-Forwarded-For`/`X-Forwarded-Proto` only from that subnet, which is where host-side proxies appear from. If that subnet clashes with another Docker network on the host, change it.
+
+The proxy must set `X-Forwarded-For` to the real client address. If it sits behind a CDN, restore the client IP first (for example nginx `real_ip_header CF-Connecting-IP`) and then send `X-Forwarded-For $remote_addr`, not `$proxy_add_x_forwarded_for`. Otherwise the tracker records every peer under the proxy's address.
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+location /webseed/ {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;
+    proxy_read_timeout 300s;
+}
+```
+
+If Icecold receives traffic directly with no proxy, set `ICECOLD_REVERSE_PROXY_ENABLED=false` and `ICECOLD_HTTP_BIND=0.0.0.0`.
+
 ### Notes
 
 - `ICECOLD_CONTENT_ROOT` is mounted read-only at `/data/files` inside the container.
 - Set `ICECOLD_AUTO_MIGRATE=false` to manage database migrations separately.
-- `compose.prod.yaml` maps deployment essentials. Use a Compose override for app-level settings such as peer-wire, webseed, super-seeding, standby mode, indexing concurrency, and tracker limits.
-- For internet-facing deployments, put Icecold behind a reverse proxy that terminates TLS. If peer-wire is enabled, it uses plain TCP on `ICECOLD_PEERWIRE_PORT` and must be reachable directly by BitTorrent clients.
+- Run a single Icecold instance per database. The tracker peer store is in memory, and on startup Icecold resets every in-progress indexing job to `Pending`, which would take over jobs owned by another live instance.
+- `compose.prod.yaml` maps deployment essentials. Use a Compose override for other app-level settings such as super-seeding, standby mode, indexing concurrency, and tracker limits.
+- Peer-wire uses plain TCP on `ICECOLD_PEERWIRE_PORT` and must be reachable directly by BitTorrent clients, not through an HTTP proxy or CDN. Open it in any host or cloud firewall.
+- Peer-wire limits connections per client address (`PeerWire:MaxConnectionsPerIp`, default 8). If Docker's userland proxy handles the published port (for example IPv6 clients reaching an IPv4-only container), every peer appears to come from the bridge gateway and they all share that limit. If that happens, set `"userland-proxy": false` in the Docker daemon config, or run the API service with `network_mode: host`.
+- The PostgreSQL service uses the `postgres:18` image, which stores data under `/var/lib/postgresql/18/docker` in the volume. Upgrading an existing volume from an older major version needs `pg_upgrade` or a dump and restore.
+- Container logs are rotated by the Docker `json-file` driver (5 × 20 MB per service).
 
 ## API
 
@@ -186,7 +230,7 @@ ConnectionStrings:Icecold
 ConnectionStrings__Icecold=Host=postgres;Port=5432;Database=icecold;Username=icecold;Password=...
 ```
 
-For production, put app-level customizations in a Compose override:
+For production, `compose.prod.yaml` already maps reverse proxy, webseed origin, and peer-wire basics from `.env`. Put other app-level customizations in a Compose override:
 
 ```yaml
 # compose.prod.override.yaml
@@ -194,15 +238,11 @@ services:
   api:
     environment:
       Icecold__WebSeed__Enabled: "true"
-      Icecold__WebSeed__PublicBaseUrl: "https://cdn.example.org"
-      Icecold__ReverseProxy__Enabled: "true"
-      Icecold__ReverseProxy__KnownNetworks__0: "172.20.0.0/16"
       Icecold__Tracker__Enabled: "true"
       Icecold__Tracker__AdditionalAnnounceUrls__0: "udp://tracker.example.net:6969/announce"
       Icecold__Tracker__AdditionalAnnounceUrls__1: "https://backup.example.test/announce"
-      Icecold__PeerWire__Enabled: "true"
-      Icecold__PeerWire__AdvertisedIp: "203.0.113.10"
-      Icecold__PeerWire__AdvertisedPort: "6881"
+      Icecold__Tracker__MaxPeersPerSourceIpPerTorrent: "8"
+      Icecold__PeerWire__MaxConnectionsPerIp: "8"
       Icecold__PeerWire__SuperSeed__Enabled: "true"
       Icecold__PeerWire__SuperSeed__MinimumPeerCount: "3"
       Icecold__PeerWire__Standby__Enabled: "true"
@@ -220,6 +260,15 @@ If peer-wire is enabled, `Icecold:PeerWire:AdvertisedIp` must be an IP address, 
 If Icecold is behind an HTTP reverse proxy, enable `Icecold:ReverseProxy:Enabled` and configure `KnownProxies` or `KnownNetworks` with the proxy connection source IPs. Icecold only trusts `X-Forwarded-For` and `X-Forwarded-Proto` from those sources. Configure the proxy or Docker network range, not public client ranges.
 
 Additional tracker URLs are appended after Icecold's own `/announce` URL in generated `.torrent` files and magnet links while `Icecold:Tracker:Enabled` is true. If the built-in tracker is disabled, Icecold's `/announce` URL is omitted and only `Icecold:Tracker:AdditionalAnnounceUrls` are emitted.
+
+Startup validation also rejects:
+
+- an empty `Icecold:AdminApiKey` when `ASPNETCORE_ENVIRONMENT=Production`
+- `PublicBaseUrl` or `WebSeed:PublicBaseUrl` values that are not absolute `http`/`https` URLs, or that carry a query string or fragment
+- tracker timings where `MinAnnounceIntervalSeconds` exceeds `AnnounceIntervalSeconds`, or where `PeerTimeoutSeconds` is not longer than `AnnounceIntervalSeconds`
+- `Stats:CacheSeconds` outside 1–300
+
+Public endpoints have per-client abuse limits. The tracker caps stored peers per client address per torrent (`Tracker:MaxPeersPerSourceIpPerTorrent`) and rate-limits announces per client address per torrent. Peer-wire caps concurrent connections per client address (`PeerWire:MaxConnectionsPerIp`) and enforces an overall handshake deadline. IPv6 clients are grouped by /64 for these limits.
 
 Startup validation requires at least one enabled serving transport: `Icecold:WebSeed:Enabled` or `Icecold:PeerWire:Enabled`.
 
@@ -291,6 +340,8 @@ docker build -t icecold-api:local .
 ```bash
 dotnet test Icecold.slnx
 ```
+
+Some tests start a PostgreSQL container through Testcontainers, so Docker must be available.
 
 ### Load and E2E Tests
 

@@ -80,7 +80,18 @@ public sealed class PublicStatsServiceTests : IDisposable
         });
 
         Assert.True(result.Failed);
-        Assert.Contains("Icecold:Stats:CacheSeconds must be between 0 and 300.", result.Failures);
+        Assert.Contains("Icecold:Stats:CacheSeconds must be between 1 and 300.", result.Failures);
+    }
+
+    [Fact]
+    public void StatsOptionsValidator_Rejects_Disabled_Cache()
+    {
+        var result = new StatsOptionsValidator().Validate(null, new IcecoldOptions
+        {
+            Stats = new StatsOptions { CacheSeconds = 0 }
+        });
+
+        Assert.True(result.Failed);
     }
 
     void AddTorrent(TorrentStatus status, long contentLength, TorrentLocationStatus? locationStatus = null)

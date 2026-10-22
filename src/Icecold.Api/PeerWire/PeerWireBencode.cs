@@ -206,7 +206,7 @@ static class PeerWireBencode
             return false;
 
         index++;
-        if (length < 0 || index + length > bytes.Length)
+        if (length < 0 || (uint)length > (uint)(bytes.Length - index))
             return false;
 
         value = bytes[index..(index + length)];

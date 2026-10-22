@@ -78,6 +78,7 @@ sealed class IcecoldProcess : IAsyncDisposable
             environment["Icecold__PeerWire__AdvertisedIp"] = "127.0.0.1";
             environment["Icecold__PeerWire__AdvertisedPort"] = peerWirePort.ToString();
             environment["Icecold__PeerWire__MaxConnections"] = "512";
+            environment["Icecold__PeerWire__MaxConnectionsPerIp"] = "512";
 
             if (!process.Start())
                 throw new InvalidOperationException("Failed to start Icecold API process.");

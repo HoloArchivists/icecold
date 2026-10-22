@@ -9,33 +9,63 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Production
       ASPNETCORE_URLS: http://0.0.0.0:8080
+      AllowedHosts: ${ICECOLD_ALLOWED_HOSTS:-*}
+      Logging__Console__FormatterName: ${ICECOLD_LOG_FORMAT:-simple}
       ConnectionStrings__Icecold: Host=postgres;Port=5432;Database=${POSTGRES_DB:-icecold};Username=${POSTGRES_USER:-icecold};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       Icecold__PublicBaseUrl: ${ICECOLD_PUBLIC_BASE_URL:?ICECOLD_PUBLIC_BASE_URL is required}
       Icecold__AdminApiKey: ${ICECOLD_ADMIN_API_KEY:?ICECOLD_ADMIN_API_KEY is required}
       Icecold__Database__AutoMigrate: ${ICECOLD_AUTO_MIGRATE:-true}
+      # Trust X-Forwarded-For/Proto only from the Compose network gateway, which is where
+      # host-side reverse proxies (nginx on the host -> published loopback port) appear from.
+      Icecold__ReverseProxy__Enabled: ${ICECOLD_REVERSE_PROXY_ENABLED:-true}
+      Icecold__ReverseProxy__KnownNetworks__0: ${ICECOLD_NETWORK_SUBNET:-172.31.250.0/24}
+      Icecold__WebSeed__PublicBaseUrl: ${ICECOLD_WEBSEED_PUBLIC_BASE_URL:-}
+      Icecold__PeerWire__Enabled: ${ICECOLD_PEERWIRE_ENABLED:-false}
+      Icecold__PeerWire__AdvertisedIp: ${ICECOLD_PEERWIRE_ADVERTISED_IP:-}
+      Icecold__PeerWire__AdvertisedPort: ${ICECOLD_PEERWIRE_PORT:-6881}
       Icecold__ContentSources__0__Name: local
       Icecold__ContentSources__0__Type: local
       Icecold__ContentSources__0__RootPath: /data/files
     ports:
-      - "${ICECOLD_HTTP_PORT:-8080}:8080"
+      # Loopback by default: put a TLS-terminating reverse proxy in front of the HTTP port.
+      - "${ICECOLD_HTTP_BIND:-127.0.0.1}:${ICECOLD_HTTP_PORT:-8080}:8080"
+      # Peer-wire is plain TCP and must be reachable directly by BitTorrent clients when enabled.
       - "${ICECOLD_PEERWIRE_PORT:-6881}:6881"
     volumes:
       - ${ICECOLD_CONTENT_ROOT:?ICECOLD_CONTENT_ROOT is required}:/data/files:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
 
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     restart: unless-stopped
+    shm_size: 256mb
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-icecold}
       POSTGRES_USER: ${POSTGRES_USER:-icecold}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      # postgres 18+ images keep data in a major-version subdirectory under /var/lib/postgresql.
+      - postgres-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-icecold} -d ${POSTGRES_DB:-icecold}"]
       interval: 5s
       timeout: 5s
       retries: 30
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${ICECOLD_NETWORK_SUBNET:-172.31.250.0/24}
 
 volumes:
   postgres-data:

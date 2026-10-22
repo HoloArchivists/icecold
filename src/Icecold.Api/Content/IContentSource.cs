@@ -11,6 +11,11 @@ public interface IContentSource
     Task<Stream> OpenReadAsync(string path, CancellationToken cancellationToken);
 
     Task<Stream> OpenRangeAsync(string path, long offset, long length, CancellationToken cancellationToken);
+
+    // Version of the content behind a stream returned by OpenReadAsync, computed the same way as
+    // ContentMetadata.Version, so callers can detect changes made while they were reading.
+    // Null when the source cannot tell from the open stream.
+    string? GetOpenStreamVersion(Stream stream) => null;
 }
 
 public interface ISeekableContentSource : IContentSource

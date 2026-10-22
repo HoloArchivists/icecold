@@ -18,25 +18,59 @@ public sealed class IndexingWorker(
 {
     const int MaxFinalizeAttempts = 16;
 
+    // Claims per job (Attempts is incremented on every claim). Retryable failures past this
+    // mark the job Failed instead of requeueing it forever; resubmitting resets the counter.
+    internal const int MaxIndexingAttempts = 5;
+
+    // The in-memory queue is bounded and never blocks writers, so Pending rows that did not fit
+    // (or whose enqueue was skipped) are picked up from the database by this periodic sweep.
+    internal TimeSpan PendingSweepInterval { get; init; } = TimeSpan.FromSeconds(15);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        var startedAt = DateTimeOffset.UtcNow;
         var concurrency = Math.Max(1, options.Value.Indexing.MaxConcurrency);
         var workers = Enumerable.Range(0, concurrency)
             .Select(_ => RunWorkerAsync(stoppingToken))
-            .ToArray();
+            .ToList();
+        workers.Add(SweepPendingAsync(startedAt, stoppingToken));
 
-        await RequeueInterruptedJobsAsync(stoppingToken);
         await Task.WhenAll(workers);
     }
 
-    async Task RequeueInterruptedJobsAsync(CancellationToken cancellationToken)
+    async Task SweepPendingAsync(DateTimeOffset startedAt, CancellationToken cancellationToken)
     {
-        await using var scope = scopeFactory.CreateAsyncScope();
-        var claims = scope.ServiceProvider.GetRequiredService<IndexingClaimService>();
-        var ids = await claims.ResetInterruptedAndListPendingAsync(cancellationToken);
+        var interruptedReset = false;
+        using var timer = new PeriodicTimer(PendingSweepInterval);
+        do
+        {
+            try
+            {
+                await using var scope = scopeFactory.CreateAsyncScope();
+                var claims = scope.ServiceProvider.GetRequiredService<IndexingClaimService>();
+                if (!interruptedReset)
+                {
+                    await claims.ResetInterruptedAsync(startedAt, cancellationToken);
+                    interruptedReset = true;
+                }
 
-        foreach (var id in ids)
-            await queue.EnqueueAsync(id, cancellationToken);
+                var capacity = Math.Max(1, options.Value.Indexing.QueueCapacity);
+                foreach (var id in await claims.ListPendingAsync(capacity, cancellationToken))
+                {
+                    if (!queue.TryEnqueue(id))
+                        break;
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Pending indexing sweep failed; retrying on the next interval.");
+            }
+        }
+        while (await timer.WaitForNextTickAsync(cancellationToken));
     }
 
     async Task RunWorkerAsync(CancellationToken cancellationToken)
@@ -53,6 +87,8 @@ public sealed class IndexingWorker(
             }
             catch (Exception ex)
             {
+                // Typically the database stayed unreachable through the status-update retries.
+                // The row may be left Hashing until the next process start resets it.
                 logger.LogError(ex, "Unhandled indexing failure for torrent {TorrentId}", torrentId);
             }
         }
@@ -85,6 +121,11 @@ public sealed class IndexingWorker(
 
             return;
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Shutdown: leave the row Hashing; the next start resets it to Pending.
+            throw;
+        }
         catch (Exception ex) when (ex is ContentSourceException or IOException or UnauthorizedAccessException)
         {
             logger.LogWarning(ex, "Indexing failed for torrent {TorrentId}", torrentId);
@@ -95,6 +136,12 @@ public sealed class IndexingWorker(
         {
             logger.LogWarning(ex, "Indexing database conflict for torrent {TorrentId}; requeueing.", torrentId);
             await RequeueForRetryAsync(torrentId, "Indexing hit a transient database conflict.", cancellationToken);
+            return;
+        }
+        catch (Exception ex) when (DatabaseRetry.IsTransient(ex))
+        {
+            logger.LogWarning(ex, "Transient database error while indexing torrent {TorrentId}; requeueing.", torrentId);
+            await RequeueForRetryAsync(torrentId, "Indexing hit a transient database error.", cancellationToken);
             return;
         }
         catch (Exception ex)
@@ -158,8 +205,11 @@ public sealed class IndexingWorker(
 
                 return true;
             }
-            catch (Exception ex) when (DatabaseRetry.IsSerializationOrUniqueConflict(ex) && attempt < MaxFinalizeAttempts - 1)
+            catch (Exception ex) when (
+                (DatabaseRetry.IsSerializationOrUniqueConflict(ex) || DatabaseRetry.IsTransient(ex))
+                && attempt < MaxFinalizeAttempts - 1)
             {
+                // Retry finalization in place so a database blip does not force a full rehash.
                 db.ChangeTracker.Clear();
                 await DelayForRetryAsync(attempt, cancellationToken);
             }
@@ -251,6 +301,8 @@ public sealed class IndexingWorker(
                 && l.IsPrimary,
             cancellationToken);
 
+    // The row goes back to Pending and is left for the pending sweep rather than re-enqueued
+    // immediately, which spaces full re-hashes out by at least one sweep interval.
     async Task RequeueForRetryAsync(Guid torrentId, string reason, CancellationToken cancellationToken)
     {
         await UpdateStatusWithRetryAsync(
@@ -260,14 +312,13 @@ public sealed class IndexingWorker(
                 if (torrent.Status is TorrentStatus.Ready or TorrentStatus.Duplicate)
                     return false;
 
-                torrent.Status = TorrentStatus.Pending;
-                torrent.Error = reason;
+                var requeued = torrent.Attempts < MaxIndexingAttempts;
+                torrent.Status = requeued ? TorrentStatus.Pending : TorrentStatus.Failed;
+                torrent.Error = requeued ? reason : $"{reason} Gave up after {torrent.Attempts} attempts.";
                 torrent.UpdatedAt = DateTimeOffset.UtcNow;
                 return true;
             },
             cancellationToken);
-
-        await queue.EnqueueAsync(torrentId, CancellationToken.None);
     }
 
     async Task MarkFailedAsync(Guid torrentId, string error, CancellationToken cancellationToken)
@@ -306,7 +357,9 @@ public sealed class IndexingWorker(
                 await db.SaveChangesAsync(cancellationToken);
                 return;
             }
-            catch (Exception ex) when (DatabaseRetry.IsSerializationOrUniqueConflict(ex) && attempt < MaxFinalizeAttempts - 1)
+            catch (Exception ex) when (
+                (DatabaseRetry.IsSerializationOrUniqueConflict(ex) || DatabaseRetry.IsTransient(ex))
+                && attempt < MaxFinalizeAttempts - 1)
             {
                 await DelayForRetryAsync(attempt, cancellationToken);
             }

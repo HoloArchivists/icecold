@@ -194,9 +194,17 @@ public sealed class PeerWireSuperSeedCoordinator
         public Dictionary<int, PieceProgress> Progress { get; } = [];
     }
 
-    sealed class PieceProgress
+    internal sealed class PieceProgress
     {
+        // Disjoint, sorted served ranges are merged on insert, so repeated or overlapping
+        // requests do not grow the list. The cap bounds pathological fragmentation (tiny
+        // non-adjacent blocks); ranges beyond it are simply not credited.
+        internal const int MaxRanges = 4096;
+
         readonly List<(int Start, int End)> ranges = [];
+        long covered;
+
+        internal int RangeCount => ranges.Count;
 
         public bool Add(int start, int end, int pieceLength)
         {
@@ -205,35 +213,37 @@ public sealed class PeerWireSuperSeedCoordinator
 
             start = Math.Min(start, pieceLength);
             end = Math.Min(end, pieceLength);
-            ranges.Add((start, end));
-            ranges.Sort((left, right) => left.Start.CompareTo(right.Start));
+            if (end <= start)
+                return covered >= pieceLength;
 
-            var covered = 0;
-            var currentStart = -1;
-            var currentEnd = -1;
-            foreach (var range in ranges)
+            // First range whose end touches or passes the new start.
+            var low = 0;
+            var high = ranges.Count;
+            while (low < high)
             {
-                if (currentStart < 0)
-                {
-                    currentStart = range.Start;
-                    currentEnd = range.End;
-                    continue;
-                }
-
-                if (range.Start <= currentEnd)
-                {
-                    currentEnd = Math.Max(currentEnd, range.End);
-                    continue;
-                }
-
-                covered += currentEnd - currentStart;
-                currentStart = range.Start;
-                currentEnd = range.End;
+                var mid = (low + high) >>> 1;
+                if (ranges[mid].End < start)
+                    low = mid + 1;
+                else
+                    high = mid;
             }
 
-            if (currentStart >= 0)
-                covered += currentEnd - currentStart;
+            var first = low;
+            var last = first;
+            while (last < ranges.Count && ranges[last].Start <= end)
+            {
+                start = Math.Min(start, ranges[last].Start);
+                end = Math.Max(end, ranges[last].End);
+                covered -= ranges[last].End - ranges[last].Start;
+                last++;
+            }
 
+            if (last == first && ranges.Count >= MaxRanges)
+                return covered >= pieceLength;
+
+            ranges.RemoveRange(first, last - first);
+            ranges.Insert(first, (start, end));
+            covered += end - start;
             return covered >= pieceLength;
         }
     }

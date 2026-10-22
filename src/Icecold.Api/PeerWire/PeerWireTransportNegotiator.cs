@@ -11,17 +11,25 @@ public sealed class PeerWireTransportNegotiator(
 {
     const int MaxInitialPayloadLength = 4096;
 
-    public async Task<Stream?> NegotiateAsync(Stream stream, CancellationToken cancellationToken)
+    public Task<Stream?> NegotiateAsync(Stream stream, CancellationToken cancellationToken)
+        => NegotiateAsync(
+            stream,
+            PeerWireDeadline.After(TimeSpan.FromSeconds(options.Value.PeerWire.HandshakeTimeoutSeconds)),
+            cancellationToken);
+
+    internal async Task<Stream?> NegotiateAsync(
+        Stream stream,
+        PeerWireDeadline deadline,
+        CancellationToken cancellationToken)
     {
-        var handshakeTimeout = TimeSpan.FromSeconds(options.Value.PeerWire.HandshakeTimeoutSeconds);
-        var firstByte = await PeerWireStreamIo.ReadByteAsync(stream, handshakeTimeout, cancellationToken);
+        var firstByte = await PeerWireStreamIo.ReadByteAsync(stream, deadline, cancellationToken);
         if (firstByte < 0)
             return null;
 
         if (firstByte == PeerWireProtocol.ProtocolName.Length)
         {
             var protocol = new byte[PeerWireProtocol.ProtocolName.Length];
-            if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, protocol, handshakeTimeout, cancellationToken))
+            if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, protocol, deadline, cancellationToken))
                 return null;
 
             var prefix = new byte[protocol.Length + 1];
@@ -30,16 +38,16 @@ public sealed class PeerWireTransportNegotiator(
             if (protocol.AsSpan().SequenceEqual(PeerWireProtocol.ProtocolName))
                 return new PeerWirePrefixedStream(stream, prefix);
 
-            return await NegotiateMseAsync(stream, prefix, handshakeTimeout, cancellationToken);
+            return await NegotiateMseAsync(stream, prefix, deadline, cancellationToken);
         }
 
-        return await NegotiateMseAsync(stream, [(byte)firstByte], handshakeTimeout, cancellationToken);
+        return await NegotiateMseAsync(stream, [(byte)firstByte], deadline, cancellationToken);
     }
 
     async Task<Stream?> NegotiateMseAsync(
         Stream stream,
         byte[] publicKeyPrefix,
-        TimeSpan handshakeTimeout,
+        PeerWireDeadline deadline,
         CancellationToken cancellationToken)
     {
         try
@@ -49,19 +57,19 @@ public sealed class PeerWireTransportNegotiator(
                 return null;
 
             publicKeyPrefix.CopyTo(peerPublicKey.AsSpan());
-            if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, peerPublicKey.AsMemory(publicKeyPrefix.Length), handshakeTimeout, cancellationToken))
+            if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, peerPublicKey.AsMemory(publicKeyPrefix.Length), deadline, cancellationToken))
                 return null;
 
             var privateKey = PeerWireMse.GeneratePrivateKey();
             var publicKey = PeerWireMse.ComputePublicKey(privateKey);
             var secret = PeerWireMse.ComputeSecret(peerPublicKey, privateKey);
-            await stream.WriteAsync(publicKey, cancellationToken);
+            await PeerWireStreamIo.WriteAsync(stream, publicKey, deadline.Remaining, cancellationToken);
 
-            if (!await ReadUntilNeedleAsync(stream, PeerWireMse.HashReq1(secret), PeerWireMse.MaxPadLength, handshakeTimeout, cancellationToken))
+            if (!await ReadUntilNeedleAsync(stream, PeerWireMse.HashReq1(secret), PeerWireMse.MaxPadLength, deadline, cancellationToken))
                 return null;
 
             var xor = new byte[20];
-            if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, xor, handshakeTimeout, cancellationToken))
+            if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, xor, deadline, cancellationToken))
                 return null;
 
             var obfuscatedHash = PeerWireMse.Xor(xor, PeerWireMse.HashReq3(secret));
@@ -75,7 +83,7 @@ public sealed class PeerWireTransportNegotiator(
             var infoHash = Convert.FromHexString(torrent.InfoHashHex);
             var decrypt = CreateRc4(PeerWireMse.IncomingDecryptKey(secret, infoHash));
 
-            var header = await ReadEncryptedAsync(stream, decrypt, 14, handshakeTimeout, cancellationToken);
+            var header = await ReadEncryptedAsync(stream, decrypt, 14, deadline, cancellationToken);
             if (header is null || !header.AsSpan(0, 8).SequenceEqual(new byte[8]))
                 return null;
 
@@ -93,10 +101,10 @@ public sealed class PeerWireTransportNegotiator(
             if (padCLength > PeerWireMse.MaxPadLength)
                 return null;
 
-            if (padCLength > 0 && await ReadEncryptedAsync(stream, decrypt, padCLength, handshakeTimeout, cancellationToken) is null)
+            if (padCLength > 0 && await ReadEncryptedAsync(stream, decrypt, padCLength, deadline, cancellationToken) is null)
                 return null;
 
-            var initialPayloadLengthBytes = await ReadEncryptedAsync(stream, decrypt, 2, handshakeTimeout, cancellationToken);
+            var initialPayloadLengthBytes = await ReadEncryptedAsync(stream, decrypt, 2, deadline, cancellationToken);
             if (initialPayloadLengthBytes is null)
                 return null;
 
@@ -106,7 +114,7 @@ public sealed class PeerWireTransportNegotiator(
 
             var initialPayload = initialPayloadLength == 0
                 ? Array.Empty<byte>()
-                : await ReadEncryptedAsync(stream, decrypt, initialPayloadLength, handshakeTimeout, cancellationToken);
+                : await ReadEncryptedAsync(stream, decrypt, initialPayloadLength, deadline, cancellationToken);
             if (initialPayload is null)
                 return null;
 
@@ -115,10 +123,10 @@ public sealed class PeerWireTransportNegotiator(
             PeerWireMse.WriteUInt32(response.AsSpan(8, 4), PeerWireMse.CryptoRc4);
             PeerWireMse.WriteUInt16(response.AsSpan(12, 2), 0);
             encrypt.Process(response);
-            await stream.WriteAsync(response, cancellationToken);
+            await PeerWireStreamIo.WriteAsync(stream, response, deadline.Remaining, cancellationToken);
 
             logger.LogDebug("Peer-wire MSE RC4 transport negotiated for {InfoHash}.", torrent.InfoHashHex);
-            return new PeerWireMseStream(stream, decrypt, encrypt, initialPayload);
+            return new PeerWireMseStream(stream, decrypt, encrypt, initialPayload, torrent.InfoHashHex);
         }
         catch (InvalidOperationException ex)
         {
@@ -143,11 +151,11 @@ public sealed class PeerWireTransportNegotiator(
         Stream stream,
         PeerWireRc4 rc4,
         int byteCount,
-        TimeSpan timeout,
+        PeerWireDeadline deadline,
         CancellationToken cancellationToken)
     {
         var buffer = new byte[byteCount];
-        if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, buffer, timeout, cancellationToken))
+        if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, buffer, deadline, cancellationToken))
             return null;
 
         rc4.Process(buffer);
@@ -158,7 +166,7 @@ public sealed class PeerWireTransportNegotiator(
         Stream stream,
         byte[] needle,
         int maxPaddingLength,
-        TimeSpan timeout,
+        PeerWireDeadline deadline,
         CancellationToken cancellationToken)
     {
         var window = new byte[needle.Length];
@@ -166,7 +174,7 @@ public sealed class PeerWireTransportNegotiator(
 
         while (totalRead < maxPaddingLength + needle.Length)
         {
-            var value = await PeerWireStreamIo.ReadByteAsync(stream, timeout, cancellationToken);
+            var value = await PeerWireStreamIo.ReadByteAsync(stream, deadline, cancellationToken);
             if (value < 0)
                 return false;
 

@@ -36,6 +36,54 @@ static class PeerWireStreamIo
         return true;
     }
 
+    public static async Task<int> ReadByteAsync(
+        Stream stream,
+        PeerWireDeadline deadline,
+        CancellationToken cancellationToken)
+    {
+        var one = new byte[1];
+        return await ReadExactlyOrFalseAsync(stream, one, deadline, cancellationToken) ? one[0] : -1;
+    }
+
+    public static async Task<bool> ReadExactlyOrFalseAsync(
+        Stream stream,
+        Memory<byte> buffer,
+        PeerWireDeadline deadline,
+        CancellationToken cancellationToken)
+    {
+        var read = 0;
+        while (read < buffer.Length)
+        {
+            var current = await ReadAsync(stream, buffer[read..], deadline.Remaining, cancellationToken);
+            if (current == 0)
+                return false;
+
+            read += current;
+        }
+
+        return true;
+    }
+
+    // Writes need a bound too: a peer that stops reading (zero TCP window) would otherwise
+    // park the write, and its connection slot, forever.
+    public static async Task WriteAsync(
+        Stream stream,
+        ReadOnlyMemory<byte> buffer,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutSource.CancelAfter(timeout);
+        try
+        {
+            await stream.WriteAsync(buffer, timeoutSource.Token);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException("Peer-wire write timed out.");
+        }
+    }
+
     static async ValueTask<int> ReadAsync(
         Stream stream,
         Memory<byte> buffer,

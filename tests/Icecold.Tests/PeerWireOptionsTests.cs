@@ -75,6 +75,29 @@ public sealed class PeerWireOptionsTests
         Assert.Contains("Icecold:PeerWire:IdleTimeoutSeconds must be between 1 and 3600.", result.Failures);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void Validate_Fails_When_MaxConnectionsPerIp_Is_Out_Of_Range(int maxConnectionsPerIp)
+    {
+        var result = new PeerWireOptionsValidator().Validate(null, new IcecoldOptions
+        {
+            PeerWire = new PeerWireOptions
+            {
+                Enabled = true,
+                BindAddress = "0.0.0.0",
+                ListenPort = 6881,
+                AdvertisedIp = "192.168.0.150",
+                AdvertisedPort = 6881,
+                MaxConnections = 128,
+                MaxConnectionsPerIp = maxConnectionsPerIp
+            }
+        });
+
+        Assert.True(result.Failed);
+        Assert.Contains("Icecold:PeerWire:MaxConnectionsPerIp must be at least 1.", result.Failures);
+    }
+
     [Fact]
     public void Validate_Fails_When_SuperSeed_Settings_Are_Invalid()
     {

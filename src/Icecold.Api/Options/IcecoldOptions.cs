@@ -64,6 +64,8 @@ public sealed class TrackerOptions
 
     public int MaxPeersStoredPerTorrent { get; set; } = 1000;
 
+    public int MaxPeersPerSourceIpPerTorrent { get; set; } = 8;
+
     public int PruneIntervalSeconds { get; set; } = 300;
 
     public List<string> AdditionalAnnounceUrls { get; set; } = [];
@@ -108,6 +110,8 @@ public sealed class PeerWireOptions
     public int MaxOutstandingRequests { get; set; } = 8192;
 
     public int MaxConnections { get; set; } = 128;
+
+    public int MaxConnectionsPerIp { get; set; } = 8;
 
     public int HandshakeTimeoutSeconds { get; set; } = 15;
 

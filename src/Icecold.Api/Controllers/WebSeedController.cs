@@ -12,8 +12,10 @@ namespace Icecold.Api.Controllers;
 public sealed class WebSeedController(WebSeedService webSeed, IOptions<IcecoldOptions> options) : ControllerBase
 {
     const string InvalidInfoHashMessage = "infoHash must be a 40 character hex SHA-1 info hash";
+    const string RetryAfterSeconds = "60";
 
     [HttpGet("/webseed/{infoHash}/{**fileName}")]
+    [HttpHead("/webseed/{infoHash}/{**fileName}")]
     public async Task<IActionResult> Get(string infoHash, string? fileName, CancellationToken cancellationToken)
     {
         if (!options.Value.WebSeed.Enabled)
@@ -22,21 +24,17 @@ public sealed class WebSeedController(WebSeedService webSeed, IOptions<IcecoldOp
         if (!InfoHashUtil.IsHexInfoHash(infoHash))
             return BadRequest(new ProblemDetailsDto(InvalidInfoHashMessage));
 
-        WebSeedOpenResult result;
-        try
-        {
-            result = await webSeed.OpenAsync(infoHash, Request.Headers[HeaderNames.Range].ToString(), cancellationToken);
-        }
-        catch (BadHttpRequestException ex)
-        {
-            return BadRequest(new ProblemDetailsDto(ex.Message));
-        }
+        var result = await webSeed.OpenAsync(infoHash, Request.Headers[HeaderNames.Range].ToString(), cancellationToken);
 
         if (result.Status == WebSeedOpenStatus.NotFound)
             return NotFound();
 
-        if (result.Status == WebSeedOpenStatus.Conflict)
-            return Problem(result.Error, statusCode: StatusCodes.Status409Conflict);
+        // Backing storage can come back (remount, cold tier restore), so this is retryable rather than a client conflict.
+        if (result.Status == WebSeedOpenStatus.Unavailable)
+        {
+            Response.Headers[HeaderNames.RetryAfter] = RetryAfterSeconds;
+            return Problem(result.Error, statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
 
         if (result.Status == WebSeedOpenStatus.RangeNotSatisfiable)
         {
@@ -47,7 +45,12 @@ public sealed class WebSeedController(WebSeedService webSeed, IOptions<IcecoldOp
             return new EmptyResult();
         }
 
+        await using var stream = result.Stream!;
+
+        // Content behind an infohash is immutable, so the infohash is a stable strong validator.
         Response.Headers[HeaderNames.AcceptRanges] = "bytes";
+        Response.Headers[HeaderNames.CacheControl] = "public, max-age=86400";
+        Response.Headers[HeaderNames.ETag] = $"\"{infoHash.ToLowerInvariant()}\"";
         Response.ContentType = "application/octet-stream";
         Response.ContentLength = result.Length;
 
@@ -57,8 +60,9 @@ public sealed class WebSeedController(WebSeedService webSeed, IOptions<IcecoldOp
             Response.Headers[HeaderNames.ContentRange] = $"bytes {result.Offset}-{result.Offset + result.Length - 1}/{result.ContentLength}";
         }
 
-        await using var stream = result.Stream!;
-        await stream.CopyToAsync(Response.Body, cancellationToken);
+        if (!HttpMethods.IsHead(Request.Method))
+            await stream.CopyToAsync(Response.Body, cancellationToken);
+
         return new EmptyResult();
     }
 }

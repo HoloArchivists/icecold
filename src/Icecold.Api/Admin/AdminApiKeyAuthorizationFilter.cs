@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Icecold.Api.Options;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
@@ -26,11 +28,15 @@ public sealed class AdminApiKeyAuthorizationFilter(IOptions<IcecoldOptions> opti
 
         if (!context.HttpContext.Request.Headers.TryGetValue(HeaderName, out var provided)
             || provided.Count != 1
-            || !string.Equals(provided[0], expected, StringComparison.Ordinal))
+            || !FixedTimeEquals(provided[0], expected))
         {
             context.Result = new UnauthorizedResult();
         }
 
         return Task.CompletedTask;
     }
+
+    static bool FixedTimeEquals(string? provided, string expected)
+        => provided is not null
+            && CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(provided), Encoding.UTF8.GetBytes(expected));
 }

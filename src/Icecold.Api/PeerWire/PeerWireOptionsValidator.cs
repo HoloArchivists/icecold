@@ -34,6 +34,9 @@ public sealed class PeerWireOptionsValidator : IValidateOptions<IcecoldOptions>
         if (peerWire.MaxConnections < 1)
             failures.Add("Icecold:PeerWire:MaxConnections must be at least 1.");
 
+        if (peerWire.MaxConnectionsPerIp < 1)
+            failures.Add("Icecold:PeerWire:MaxConnectionsPerIp must be at least 1.");
+
         if (peerWire.HandshakeTimeoutSeconds is < 1 or > 300)
             failures.Add("Icecold:PeerWire:HandshakeTimeoutSeconds must be between 1 and 300.");
 

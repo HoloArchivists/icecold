@@ -19,7 +19,14 @@ public sealed record PeerWirePieceRequest(int PieceIndex, int Begin, int Length,
         if (length < 1 || length > maxBlockLength)
             return false;
 
-        var offset = (long)pieceIndex * torrent.PieceLength + begin;
+        // The block must stay inside its own piece; otherwise begin could address another
+        // piece's data and sidestep super-seeding's per-piece advertisement.
+        var pieceStart = (long)pieceIndex * torrent.PieceLength;
+        var actualPieceLength = Math.Min(torrent.PieceLength, torrent.ContentLength - pieceStart);
+        if ((long)begin + length > actualPieceLength)
+            return false;
+
+        var offset = pieceStart + begin;
         if (offset < 0 || offset >= torrent.ContentLength)
             return false;
 

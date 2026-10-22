@@ -29,7 +29,7 @@ public sealed class LocalFileContentSource : ISeekableContentSource
         var file = new FileInfo(fullPath);
 
         var relativePath = ToRelativePath(fullPath);
-        var version = $"{file.Length:x16}-{file.LastWriteTimeUtc.Ticks:x16}";
+        var version = FormatVersion(file.Length, file.LastWriteTimeUtc);
         return Task.FromResult(new ContentMetadata(
             Name,
             relativePath,
@@ -46,6 +46,13 @@ public sealed class LocalFileContentSource : ISeekableContentSource
         var fullPath = ResolveExistingFile(path);
         return Task.FromResult<Stream>(OpenFile(fullPath, FileOptions.Asynchronous | FileOptions.SequentialScan));
     }
+
+    // Re-stats the open handle (fstat), so a replace-by-rename or in-place write is detected
+    // even though the path still resolves.
+    public string? GetOpenStreamVersion(Stream stream)
+        => stream is FileStream file
+            ? FormatVersion(file.Length, File.GetLastWriteTimeUtc(file.SafeFileHandle))
+            : null;
 
     public Task<Stream> OpenRangeAsync(string path, long offset, long length, CancellationToken cancellationToken)
     {
@@ -125,6 +132,9 @@ public sealed class LocalFileContentSource : ISeekableContentSource
 
     string ToRelativePath(string fullPath)
         => Path.GetRelativePath(rootPath, fullPath).Replace(Path.DirectorySeparatorChar, '/');
+
+    static string FormatVersion(long length, DateTime lastWriteTimeUtc)
+        => $"{length:x16}-{lastWriteTimeUtc.Ticks:x16}";
 
     static FileStream OpenFile(string path, FileOptions options)
         => new(path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 1 << 20, options);

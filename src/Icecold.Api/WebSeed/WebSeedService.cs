@@ -20,7 +20,7 @@ public sealed class WebSeedService(TorrentLocationService locations)
                 if (attemptedLocations.Count > 0
                     || await locations.ReadyTorrentExistsByInfoHashAsync(infoHash, cancellationToken))
                 {
-                    return WebSeedOpenResult.Conflict("No readable backing location is currently available for this torrent.");
+                    return WebSeedOpenResult.Unavailable("No readable backing location is currently available for this torrent.");
                 }
 
                 return WebSeedOpenResult.NotFound();
@@ -46,13 +46,20 @@ public sealed class WebSeedService(TorrentLocationService locations)
         }
     }
 
+    // Per RFC 9110 a server may ignore Range; invalid, non-bytes, and multi-range headers get the full 200 body.
+    // Only a syntactically valid single byte range that misses the content is answered with 416.
     static WebSeedRangeSelection ParseRange(string? rangeHeader, long contentLength)
     {
+        var full = new WebSeedRangeSelection(0, contentLength, Partial: false, Satisfiable: true);
         if (string.IsNullOrWhiteSpace(rangeHeader))
-            return new WebSeedRangeSelection(0, contentLength, Partial: false, Satisfiable: true);
+            return full;
 
-        if (!RangeHeaderValue.TryParse(rangeHeader, out var parsed) || parsed.Ranges.Count != 1)
-            throw new BadHttpRequestException("Only a single valid byte range is supported.");
+        if (!RangeHeaderValue.TryParse(rangeHeader, out var parsed)
+            || !string.Equals(parsed.Unit.Value, "bytes", StringComparison.OrdinalIgnoreCase)
+            || parsed.Ranges.Count != 1)
+        {
+            return full;
+        }
 
         var range = parsed.Ranges.Single();
         long start;
@@ -60,6 +67,9 @@ public sealed class WebSeedService(TorrentLocationService locations)
 
         if (range.From.HasValue)
         {
+            if (range.To < range.From)
+                return full;
+
             start = range.From.Value;
             end = range.To ?? contentLength - 1;
         }
@@ -74,7 +84,7 @@ public sealed class WebSeedService(TorrentLocationService locations)
         }
         else
         {
-            throw new BadHttpRequestException("Invalid byte range.");
+            return full;
         }
 
         if (start < 0 || start >= contentLength || end < start)
@@ -103,8 +113,8 @@ public sealed record WebSeedOpenResult(
     public static WebSeedOpenResult NotFound()
         => new(WebSeedOpenStatus.NotFound, null, 0, 0, 0, false, null);
 
-    public static WebSeedOpenResult Conflict(string error)
-        => new(WebSeedOpenStatus.Conflict, null, 0, 0, 0, false, error);
+    public static WebSeedOpenResult Unavailable(string error)
+        => new(WebSeedOpenStatus.Unavailable, null, 0, 0, 0, false, error);
 
     public static WebSeedOpenResult RangeNotSatisfiable(long contentLength)
         => new(WebSeedOpenStatus.RangeNotSatisfiable, null, 0, 0, contentLength, false, null);
@@ -114,7 +124,7 @@ public enum WebSeedOpenStatus
 {
     Opened,
     NotFound,
-    Conflict,
+    Unavailable,
     RangeNotSatisfiable
 }
 

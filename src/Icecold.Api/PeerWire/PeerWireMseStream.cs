@@ -6,9 +6,13 @@ sealed class PeerWireMseStream(
     Stream inner,
     PeerWireRc4 decrypt,
     PeerWireRc4 encrypt,
-    byte[] initialPlaintext) : Stream
+    byte[] initialPlaintext,
+    string infoHashHex) : Stream
 {
     int initialOffset;
+
+    // The torrent selected by the MSE SKEY; the BitTorrent handshake inside must name the same one.
+    public string InfoHashHex { get; } = infoHashHex;
 
     public override bool CanRead => inner.CanRead;
 
