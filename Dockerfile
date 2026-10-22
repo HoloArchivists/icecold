@@ -3,13 +3,14 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
+# Packages stay in the restore layer rather than a cache mount: CI restores layers from the GitHub
+# Actions cache but not cache mounts, so a cached restore layer would otherwise reach publish with
+# an empty package folder.
 COPY src/Icecold.Api/Icecold.Api.csproj src/Icecold.Api/
-RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
-    dotnet restore src/Icecold.Api/Icecold.Api.csproj
+RUN dotnet restore src/Icecold.Api/Icecold.Api.csproj
 
 COPY src/ src/
-RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
-    dotnet publish src/Icecold.Api/Icecold.Api.csproj \
+RUN dotnet publish src/Icecold.Api/Icecold.Api.csproj \
     --configuration Release \
     --no-restore \
     --output /app/publish \
