@@ -47,7 +47,7 @@ Icecold may not fit if:
 - Peer-wire is upload-only TCP, including `ut_metadata` for magnet clients and MSE/RC4 encryption. Icecold does not download from peers, initiate outbound connections, or support uTP.
 - If the built-in tracker is disabled, WebSeed is required for Icecold-origin serving. Icecold peer-wire will not be discoverable because Icecold does not announce itself through DHT, PEX, or external trackers.
 - The tracker peer store is in-memory and single-instance.
-- Local filesystem content sources are implemented. S3 and HTTP backends would fit the existing `IContentSource` interface but are not built yet.
+- Local filesystem and HTTP origin content sources are implemented. S3 would fit the existing `IContentSource` interface but is not built yet.
 - Public multi-tenant hardening is out of scope.
 
 ## Deployment
@@ -130,7 +130,7 @@ If Icecold receives traffic directly with no proxy, set `ICECOLD_REVERSE_PROXY_E
 
 - `ICECOLD_CONTENT_ROOT` is mounted read-only at `/data/files` inside the container.
 - Set `ICECOLD_AUTO_MIGRATE=false` to manage database migrations separately.
-- Run a single Icecold instance per database. The tracker peer store is in memory, and on startup Icecold resets every in-progress indexing job to `Pending`, which would take over jobs owned by another live instance.
+- Run a single Icecold instance per database, because the tracker peer store is in memory. The indexing queue itself lives in the database: workers claim jobs under a lease they renew while hashing, and a job whose worker died is picked up again once its lease (`Indexing:LeaseDurationSeconds`, default 60) expires. On graceful shutdown in-progress jobs are handed back immediately.
 - `compose.prod.yaml` maps deployment essentials. Use a Compose override for other app-level settings such as super-seeding, standby mode, indexing concurrency, and tracker limits.
 - Peer-wire uses plain TCP on `ICECOLD_PEERWIRE_PORT` and must be reachable directly by BitTorrent clients, not through an HTTP proxy or CDN. Open it in any host or cloud firewall.
 - Peer-wire limits connections per client address (`PeerWire:MaxConnectionsPerIp`, default 8). If Docker's userland proxy handles the published port (for example IPv6 clients reaching an IPv4-only container), every peer appears to come from the bridge gateway and they all share that limit. If that happens, set `"userland-proxy": false` in the Docker daemon config, or run the API service with `network_mode: host`.
@@ -145,10 +145,29 @@ If Icecold receives traffic directly with no proxy, set `ICECOLD_REVERSE_PROXY_E
 curl -i http://localhost:8080/api/index/file \
   -H 'Content-Type: application/json' \
   -H 'X-Icecold-Admin-Key: replace-with-a-long-random-admin-key' \
-  -d '{"source":"local","path":"example.txt"}'
+  -d '{"source":"local","path":"example.txt","priority":0}'
 ```
 
-Poll the returned `/api/torrents/{id}` URL until `status` is `Ready`.
+`priority` is optional (default `0`). Higher values are hashed first; within a priority, jobs run in submission order. Re-submitting a queued file can only raise its priority, so a caller can bump a job whenever it sees demand. To set an exact value (including lowering it), use:
+
+```bash
+curl -i -X PUT http://localhost:8080/api/torrents/{id}/priority \
+  -H 'Content-Type: application/json' \
+  -H 'X-Icecold-Admin-Key: replace-with-a-long-random-admin-key' \
+  -d '{"priority":10}'
+```
+
+This returns `409 Conflict` once the job is no longer `Pending` or `Hashing`.
+
+Poll the returned `/api/torrents/{id}` URL until `status` is `Ready`. While waiting, the response reports progress:
+
+| Field | Meaning |
+|---|---|
+| `queuePosition` | While `Pending`: number of queued jobs that will run before this one at current priorities. `0` means next. |
+| `hashedBytes` | While `Hashing`: bytes hashed so far, out of `contentLength`. Updated every few seconds. |
+| `priority` | Current priority. |
+
+A job that fails with a retryable error (backing store unreachable, database blip) goes back to `Pending` with an exponential backoff, up to 5 attempts. A job that keeps failing ends up `Failed`, with the reason in `error`.
 
 ### Download
 
@@ -277,6 +296,35 @@ When `Icecold:Tracker:Enabled` is false, startup validation also requires `Iceco
 Super-seeding is intended for torrents with multiple leechers. With only one leecher, Icecold still makes progress by revealing the next piece after the current advertised piece has been fully uploaded, but throughput can be lower than normal peer-wire mode because the client only sees a small piece window. Threshold-based super-seeding only affects new peer-wire connections; a client that already received the full bitfield stays in normal mode until it reconnects.
 
 Swarm standby mode uses the built-in tracker's external seeder count. Leechers with partial data are ignored for standby decisions, so Icecold keeps advertising/uploading until enough non-Icecold peers announce `left=0`.
+
+### HTTP Content Sources
+
+An `http` source serves files from a static HTTP origin such as nginx, an S3-compatible endpoint with public or header-authenticated access, or another mirror. Paths in index requests are relative to `BaseUrl`, so callers can only name files under that prefix, never arbitrary URLs.
+
+```yaml
+Icecold__ContentSources__1__Name: "mirror"
+Icecold__ContentSources__1__Type: "http"
+Icecold__ContentSources__1__BaseUrl: "https://origin.example.org/datasets/"
+Icecold__ContentSources__1__Headers__Authorization: "Bearer ..."   # optional
+```
+
+| Setting | Default | |
+|---|---|---|
+| `BaseUrl` | | Absolute `http`/`https` URL without query, fragment or credentials. |
+| `Headers` | | Extra request headers, e.g. `Authorization`. |
+| `RequestTimeoutSeconds` | 30 | Limit for connecting and receiving response headers, and for each body read. |
+| `MaxConnections` | 32 | Connections to the origin. |
+| `MetadataCacheSeconds` | 5 | How long `HEAD` results are reused. |
+| `ReadAheadBytes` | 1048576 | Window fetched per range request when peer-wire reads 16 KiB blocks. |
+| `MaxResumeAttempts` | 3 | Reconnects allowed without progress before a body read fails. |
+
+The origin must:
+
+- send a strong `ETag` or a `Last-Modified` header. Icecold uses it as the content version and sends it back as `If-Match`/`If-Unmodified-Since` on every read, so a file replaced on the origin fails reads and its location is marked stale instead of serving mixed bytes;
+- support byte ranges (`Accept-Ranges: bytes`) for WebSeed and peer-wire serving and for resuming dropped downloads while hashing. Indexing works without ranges, but a dropped connection then restarts the hash;
+- serve the raw bytes (Icecold asks for `Accept-Encoding: identity`) and answer directly. Redirects are not followed.
+
+`HEAD` is used for metadata, with a one-byte range `GET` as a fallback for origins that reject `HEAD`. A `404`/`410` marks a location missing. Timeouts, `408`, `429` and `5xx` are treated as temporary: indexing retries them with backoff, and serving fails over to another location.
 
 ## Development
 

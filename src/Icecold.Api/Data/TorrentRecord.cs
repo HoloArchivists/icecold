@@ -32,6 +32,21 @@ public sealed class TorrentRecord
 
     public int Attempts { get; set; }
 
+    // Higher runs first. Callers may raise it while the job is queued.
+    public int Priority { get; set; }
+
+    // Queue order within a priority, and the earliest time a retried job may be claimed again.
+    public DateTimeOffset AvailableAt { get; set; }
+
+    // Identifies the claim currently hashing this row. Every write after the claim is fenced on it,
+    // so a worker whose lease expired cannot overwrite the result of the worker that took over.
+    public string? LeaseOwner { get; set; }
+
+    public DateTimeOffset? LeaseExpiresAt { get; set; }
+
+    // Hashing progress, persisted with each lease renewal.
+    public long HashedBytes { get; set; }
+
     public string? Error { get; set; }
 
     public DateTimeOffset CreatedAt { get; set; }

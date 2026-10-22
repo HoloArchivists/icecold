@@ -9,20 +9,20 @@ namespace Icecold.Api.Controllers;
 [ApiController]
 [AdminApiKey]
 [Route("api/index")]
-public sealed class AdminIndexingController(IndexFileService indexing) : ControllerBase
+public sealed class AdminIndexingController(IndexFileService indexing, IndexingQueue queue) : ControllerBase
 {
     [HttpPost("file")]
     public async Task<IActionResult> IndexFile(IndexFileRequest request, CancellationToken cancellationToken)
     {
         var result = await indexing.SubmitFileAsync(
-            new IndexFileCommand(request.Source, request.Path, request.DisplayName),
+            new IndexFileCommand(request.Source, request.Path, request.DisplayName, request.Priority),
             cancellationToken);
 
         return result.Status switch
         {
             IndexFileSubmissionStatus.Accepted => Accepted(
                 $"/api/torrents/{result.Torrent!.Id}",
-                IndexResponse.From(result.Torrent)),
+                IndexResponse.From(result.Torrent, await queue.GetQueuePositionAsync(result.Torrent, cancellationToken))),
             IndexFileSubmissionStatus.Completed => Ok(IndexResponse.From(result.Torrent!)),
             IndexFileSubmissionStatus.NotFound => NotFound(new ProblemDetailsDto(result.Error!)),
             IndexFileSubmissionStatus.BadRequest => BadRequest(new ProblemDetailsDto(result.Error!)),

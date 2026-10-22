@@ -23,7 +23,7 @@ public sealed class IndexingWorkerTests : IDisposable
     }
 
     [Fact]
-    public async Task Worker_Drains_More_Pending_Rows_Than_Queue_Capacity()
+    public async Task Worker_Drains_All_Pending_Rows()
     {
         var interceptor = new FailReadyTransitionInterceptor(failures: 0);
         await using var provider = CreateProvider(interceptor);
@@ -31,7 +31,7 @@ public sealed class IndexingWorkerTests : IDisposable
         for (var i = 0; i < 5; i++)
             ids.Add(await SeedPendingAsync(provider, $"file-{i}.bin", $"payload {i}"));
 
-        using var worker = CreateWorker(provider, queueCapacity: 1);
+        using var worker = CreateWorker(provider);
         await worker.StartAsync(CancellationToken.None);
         try
         {
@@ -51,7 +51,7 @@ public sealed class IndexingWorkerTests : IDisposable
         await using var provider = CreateProvider(interceptor);
         var id = await SeedPendingAsync(provider, "payload.bin", "payload");
 
-        using var worker = CreateWorker(provider, queueCapacity: 10);
+        using var worker = CreateWorker(provider);
         await worker.StartAsync(CancellationToken.None);
         try
         {
@@ -74,7 +74,7 @@ public sealed class IndexingWorkerTests : IDisposable
         await using var provider = CreateProvider(interceptor);
         var id = await SeedPendingAsync(provider, "payload.bin", "payload", attempts: IndexingWorker.MaxIndexingAttempts - 1);
 
-        using var worker = CreateWorker(provider, queueCapacity: 10);
+        using var worker = CreateWorker(provider);
         await worker.StartAsync(CancellationToken.None);
         try
         {
@@ -91,6 +91,88 @@ public sealed class IndexingWorkerTests : IDisposable
         Assert.Contains("Gave up after", torrent.Error);
     }
 
+    [Fact]
+    public async Task Worker_Hashes_Higher_Priority_First_And_Records_Progress()
+    {
+        await using var provider = CreateProvider(new FailReadyTransitionInterceptor(failures: 0));
+        var low = await SeedPendingAsync(provider, "low.bin", "low payload");
+        var high = await SeedPendingAsync(provider, "high.bin", "high payload", priority: 10);
+
+        using var worker = CreateWorker(provider);
+        await worker.StartAsync(CancellationToken.None);
+        try
+        {
+            await WaitUntilAsync(provider, db => db.Torrents.AllAsync(t => t.Status == TorrentStatus.Ready));
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+
+        await using var scope = provider.CreateAsyncScope();
+        var torrents = await scope.ServiceProvider.GetRequiredService<IcecoldDbContext>().Torrents.ToListAsync();
+        var lowRecord = torrents.Single(t => t.Id == low);
+        var highRecord = torrents.Single(t => t.Id == high);
+        Assert.True(highRecord.CompletedAt < lowRecord.CompletedAt);
+        Assert.Equal(highRecord.ContentLength, highRecord.HashedBytes);
+        Assert.Null(highRecord.LeaseOwner);
+        Assert.Null(highRecord.LeaseExpiresAt);
+    }
+
+    [Fact]
+    public async Task Worker_Reclaims_Job_Whose_Lease_Expired()
+    {
+        await using var provider = CreateProvider(new FailReadyTransitionInterceptor(failures: 0));
+        var id = await SeedPendingAsync(provider, "payload.bin", "payload", attempts: 1, configure: t =>
+        {
+            t.Status = TorrentStatus.Hashing;
+            t.LeaseOwner = "dead-instance/claim";
+            t.LeaseExpiresAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        });
+
+        using var worker = CreateWorker(provider);
+        await worker.StartAsync(CancellationToken.None);
+        try
+        {
+            await WaitUntilAsync(provider, db => db.Torrents.AnyAsync(t => t.Id == id && t.Status == TorrentStatus.Ready));
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+
+        await using var scope = provider.CreateAsyncScope();
+        Assert.Equal(2, (await scope.ServiceProvider.GetRequiredService<IcecoldDbContext>().Torrents.SingleAsync()).Attempts);
+    }
+
+    [Fact]
+    public async Task Job_Abandoned_Past_Max_Attempts_Is_Failed_Instead_Of_Hashed_Again()
+    {
+        await using var provider = CreateProvider(new FailReadyTransitionInterceptor(failures: 0));
+        var id = await SeedPendingAsync(provider, "payload.bin", "payload", attempts: IndexingWorker.MaxIndexingAttempts, configure: t =>
+        {
+            t.Status = TorrentStatus.Hashing;
+            t.LeaseOwner = "dead-instance/claim";
+            t.LeaseExpiresAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        });
+
+        using var worker = CreateWorker(provider);
+        await worker.StartAsync(CancellationToken.None);
+        try
+        {
+            await WaitUntilAsync(provider, db => db.Torrents.AnyAsync(t => t.Id == id && t.Status == TorrentStatus.Failed));
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+
+        await using var scope = provider.CreateAsyncScope();
+        var torrent = await scope.ServiceProvider.GetRequiredService<IcecoldDbContext>().Torrents.SingleAsync();
+        Assert.Contains("did not finish", torrent.Error);
+        Assert.Null(torrent.InfoHashHex);
+    }
+
     ServiceProvider CreateProvider(FailReadyTransitionInterceptor interceptor)
     {
         var databaseName = Guid.NewGuid().ToString("n");
@@ -98,32 +180,40 @@ public sealed class IndexingWorkerTests : IDisposable
         services.AddDbContext<IcecoldDbContext>(options => options
             .UseInMemoryDatabase(databaseName)
             .AddInterceptors(interceptor));
-        services.AddScoped<IndexingClaimService>();
+        services.AddScoped<IndexingQueue>();
         return services.BuildServiceProvider();
     }
 
-    IndexingWorker CreateWorker(ServiceProvider provider, int queueCapacity)
+    IndexingWorker CreateWorker(ServiceProvider provider)
     {
         var options = Options.Create(new IcecoldOptions
         {
             PublicBaseUrl = "http://example.test",
             ContentSources = [new ContentSourceOptions { Name = "local", Type = "local", RootPath = root }],
-            Indexing = new IndexingOptions { MaxConcurrency = 1, QueueCapacity = queueCapacity }
+            Indexing = new IndexingOptions { MaxConcurrency = 1 }
         });
 
         return new IndexingWorker(
-            new ChannelIndexingQueue(options),
+            new IndexingSignal(),
             provider.GetRequiredService<IServiceScopeFactory>(),
             new ContentSourceRegistry(options, new TestWebHostEnvironment(root)),
             new TorrentBuilder(new PublicUrlBuilder(options)),
             options,
             NullLogger<IndexingWorker>.Instance)
         {
-            PendingSweepInterval = TimeSpan.FromMilliseconds(50)
+            PollInterval = TimeSpan.FromMilliseconds(20),
+            LeaseDuration = TimeSpan.FromSeconds(30),
+            RetryBackoff = TimeSpan.FromMilliseconds(10)
         };
     }
 
-    async Task<Guid> SeedPendingAsync(ServiceProvider provider, string name, string content, int attempts = 0)
+    async Task<Guid> SeedPendingAsync(
+        ServiceProvider provider,
+        string name,
+        string content,
+        int attempts = 0,
+        int priority = 0,
+        Action<TorrentRecord>? configure = null)
     {
         await File.WriteAllTextAsync(Path.Combine(root, name), content);
         var metadata = await new LocalFileContentSource("local", root).GetMetadataAsync(name, CancellationToken.None);
@@ -141,9 +231,12 @@ public sealed class IndexingWorkerTests : IDisposable
             ContentLastModified = metadata.LastModified,
             Status = TorrentStatus.Pending,
             Attempts = attempts,
+            Priority = priority,
+            AvailableAt = now,
             CreatedAt = now,
             UpdatedAt = now
         };
+        configure?.Invoke(torrent);
         db.Torrents.Add(torrent);
         await db.SaveChangesAsync();
         return torrent.Id;

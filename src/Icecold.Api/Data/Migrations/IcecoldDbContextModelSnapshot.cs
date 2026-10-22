@@ -17,7 +17,7 @@ namespace Icecold.Api.Data.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "10.0.4")
+                .HasAnnotation("ProductVersion", "10.0.13")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
@@ -79,8 +79,6 @@ namespace Icecold.Api.Data.Migrations
 
                     b.HasIndex("Status");
 
-                    b.HasIndex("TorrentId");
-
                     b.HasIndex("TorrentId")
                         .IsUnique()
                         .HasDatabaseName("IX_torrent_locations_Primary")
@@ -108,6 +106,9 @@ namespace Icecold.Api.Data.Migrations
 
                     b.Property<int>("Attempts")
                         .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset>("AvailableAt")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTimeOffset?>("CompletedAt")
                         .HasColumnType("timestamp with time zone");
@@ -137,9 +138,19 @@ namespace Icecold.Api.Data.Migrations
                         .HasMaxLength(4096)
                         .HasColumnType("character varying(4096)");
 
+                    b.Property<long>("HashedBytes")
+                        .HasColumnType("bigint");
+
                     b.Property<string>("InfoHashHex")
                         .HasMaxLength(40)
                         .HasColumnType("character varying(40)");
+
+                    b.Property<DateTimeOffset?>("LeaseExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LeaseOwner")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
 
                     b.Property<string>("MseObfuscatedHashHex")
                         .HasMaxLength(40)
@@ -149,6 +160,9 @@ namespace Icecold.Api.Data.Migrations
                         .HasColumnType("integer");
 
                     b.Property<int?>("PieceLength")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Priority")
                         .HasColumnType("integer");
 
                     b.Property<string>("SourceName")
@@ -180,6 +194,10 @@ namespace Icecold.Api.Data.Migrations
                         .IsUnique()
                         .HasFilter("\"InfoHashHex\" IS NOT NULL AND \"Status\" = 'Ready'");
 
+                    b.HasIndex("LeaseExpiresAt")
+                        .HasDatabaseName("IX_torrents_HashingLeases")
+                        .HasFilter("\"Status\" = 'Hashing'");
+
                     b.HasIndex("MseObfuscatedHashHex")
                         .IsUnique()
                         .HasFilter("\"MseObfuscatedHashHex\" IS NOT NULL AND \"Status\" = 'Ready'");
@@ -187,6 +205,11 @@ namespace Icecold.Api.Data.Migrations
                     b.HasIndex("Status");
 
                     b.HasIndex("SourceName", "SourcePath");
+
+                    b.HasIndex("Priority", "AvailableAt", "Id")
+                        .IsDescending(true, false, false)
+                        .HasDatabaseName("IX_torrents_PendingQueue")
+                        .HasFilter("\"Status\" = 'Pending'");
 
                     b.HasIndex("SourceName", "SourcePath", "ContentLength", "ContentVersion")
                         .IsUnique()

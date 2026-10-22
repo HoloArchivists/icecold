@@ -9,6 +9,9 @@ public sealed record IndexResponse(
     string DisplayName,
     long ContentLength,
     string Status,
+    int Priority,
+    int? QueuePosition,
+    long? HashedBytes,
     string? InfoHash,
     Guid? DuplicateOfId,
     int? PieceLength,
@@ -16,7 +19,9 @@ public sealed record IndexResponse(
     string? Error,
     IReadOnlyList<TorrentLocationResponse> Locations)
 {
-    public static IndexResponse From(TorrentRecord torrent)
+    // QueuePosition counts the Pending jobs ahead of this one; HashedBytes is set while Hashing and
+    // is persisted every few seconds by the worker that holds the job.
+    public static IndexResponse From(TorrentRecord torrent, int? queuePosition = null)
         => new(
             torrent.Id,
             torrent.SourceName,
@@ -24,6 +29,9 @@ public sealed record IndexResponse(
             torrent.DisplayName,
             torrent.ContentLength,
             torrent.Status.ToString(),
+            torrent.Priority,
+            torrent.Status == TorrentStatus.Pending ? queuePosition : null,
+            torrent.Status == TorrentStatus.Hashing ? torrent.HashedBytes : null,
             torrent.InfoHashHex,
             torrent.DuplicateOfId,
             torrent.PieceLength,
