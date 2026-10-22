@@ -14,3 +14,10 @@ src/Icecold.Api/data/files/
 *.user
 *.suo
 *.swp
+
+.github/
+tests/
+*.md
+.env
+.env.*
+compose*.yaml
