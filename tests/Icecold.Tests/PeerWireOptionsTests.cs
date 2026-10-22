@@ -77,7 +77,7 @@ public sealed class PeerWireOptionsTests
 
     [Theory]
     [InlineData(0)]
-    [InlineData(129)]
+    [InlineData(-1)]
     public void Validate_Fails_When_MaxConnectionsPerIp_Is_Out_Of_Range(int maxConnectionsPerIp)
     {
         var result = new PeerWireOptionsValidator().Validate(null, new IcecoldOptions
@@ -95,7 +95,7 @@ public sealed class PeerWireOptionsTests
         });
 
         Assert.True(result.Failed);
-        Assert.Contains("Icecold:PeerWire:MaxConnectionsPerIp must be between 1 and MaxConnections.", result.Failures);
+        Assert.Contains("Icecold:PeerWire:MaxConnectionsPerIp must be at least 1.", result.Failures);
     }
 
     [Fact]

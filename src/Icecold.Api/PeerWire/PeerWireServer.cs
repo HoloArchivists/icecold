@@ -24,7 +24,9 @@ public sealed class PeerWireServer(
 
         var bindAddress = IPAddress.Parse(peerWire.BindAddress);
         var listener = new TcpListener(bindAddress, peerWire.ListenPort);
-        var limiter = new PeerWireConnectionLimiter(peerWire.MaxConnections, peerWire.MaxConnectionsPerIp);
+        var limiter = new PeerWireConnectionLimiter(
+            peerWire.MaxConnections,
+            Math.Min(peerWire.MaxConnectionsPerIp, peerWire.MaxConnections));
         var connections = new HashSet<Task>();
 
         listener.Start();

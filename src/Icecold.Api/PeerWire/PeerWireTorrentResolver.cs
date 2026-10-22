@@ -12,20 +12,22 @@ public sealed class PeerWireTorrentResolver(TorrentLocationService locations)
     readonly Dictionary<string, CacheEntry> cache = new(StringComparer.Ordinal);
 
     // Every peer-wire connection would otherwise cost a DB query, a content stat and a SHA-1 of
-    // the info dictionary. Results (including misses) are reused briefly; a location that fails
-    // to read is invalidated by the handler so the next connection re-resolves and fails over.
-    internal TimeSpan CacheTtl { get; init; } = TimeSpan.FromSeconds(30);
+    // the info dictionary. Results (including misses) are reused briefly. Hits still re-stat the
+    // backing file so rewritten content falls through to a full resolve (which marks it Stale),
+    // and a location that fails to read is invalidated by the handler so the next connection
+    // re-resolves and fails over. Admin location changes take effect within one TTL.
+    internal TimeSpan CacheTtl { get; init; } = TimeSpan.FromSeconds(10);
 
     public async Task<PeerWireTorrentContext?> ResolveAsync(string infoHashHex, CancellationToken cancellationToken)
     {
         var normalized = infoHashHex.ToLowerInvariant();
         var key = InfoHashKey(normalized);
-        if (TryGetCached(key, out var cached))
-            return cached;
+        if (await TryGetCachedAsync(key, cancellationToken) is { } cached)
+            return cached.Context;
 
         var resolved = await locations.ResolveByInfoHashAsync(normalized, cancellationToken);
         var context = BuildContext(resolved, normalized);
-        Store(key, context);
+        Store(key, context, resolved?.Metadata);
         return context;
     }
 
@@ -33,16 +35,16 @@ public sealed class PeerWireTorrentResolver(TorrentLocationService locations)
     {
         var normalized = obfuscatedHashHex.ToLowerInvariant();
         var key = MseHashKey(normalized);
-        if (TryGetCached(key, out var cached))
-            return cached;
+        if (await TryGetCachedAsync(key, cancellationToken) is { } cached)
+            return cached.Context;
 
         var resolved = await locations.ResolveByMseObfuscatedHashAsync(normalized, cancellationToken);
         var context = BuildContext(resolved, resolved?.Torrent.InfoHashHex?.ToLowerInvariant());
-        Store(key, context);
+        Store(key, context, resolved?.Metadata);
 
         // The plaintext handshake inside the MSE stream resolves the same torrent by infohash next.
         if (context is not null)
-            Store(InfoHashKey(context.InfoHashHex.ToLowerInvariant()), context);
+            Store(InfoHashKey(context.InfoHashHex.ToLowerInvariant()), context, resolved!.Metadata);
 
         return context;
     }
@@ -63,27 +65,39 @@ public sealed class PeerWireTorrentResolver(TorrentLocationService locations)
     static string MseHashKey(string obfuscatedHashHex)
         => "m:" + obfuscatedHashHex;
 
-    bool TryGetCached(string key, out PeerWireTorrentContext? context)
+    async Task<CacheEntry?> TryGetCachedAsync(string key, CancellationToken cancellationToken)
     {
+        CacheEntry? entry;
         lock (gate)
         {
-            if (cache.TryGetValue(key, out var entry))
-            {
-                if (Stopwatch.GetTimestamp() < entry.ExpiresAtTimestamp)
-                {
-                    context = entry.Context;
-                    return true;
-                }
+            if (!cache.TryGetValue(key, out entry))
+                return null;
 
+            if (Stopwatch.GetTimestamp() >= entry.ExpiresAtTimestamp)
+            {
                 cache.Remove(key);
+                return null;
             }
         }
 
-        context = null;
-        return false;
+        if (entry.Context is null)
+            return entry;
+
+        try
+        {
+            var metadata = await entry.Context.Source.GetMetadataAsync(entry.Context.SourcePath, cancellationToken);
+            if (metadata.Length == entry.ContentLength && metadata.Version == entry.ContentVersion)
+                return entry;
+        }
+        catch (Exception ex) when (ex is ContentSourceException or IOException or UnauthorizedAccessException)
+        {
+        }
+
+        Invalidate(entry.Context.InfoHashHex);
+        return null;
     }
 
-    void Store(string key, PeerWireTorrentContext? context)
+    void Store(string key, PeerWireTorrentContext? context, ContentMetadata? metadata)
     {
         if (CacheTtl <= TimeSpan.Zero)
             return;
@@ -103,7 +117,7 @@ public sealed class PeerWireTorrentResolver(TorrentLocationService locations)
                     cache.Clear();
             }
 
-            cache[key] = new CacheEntry(context, expiresAt);
+            cache[key] = new CacheEntry(context, metadata?.Length ?? 0, metadata?.Version, expiresAt);
         }
     }
 
@@ -131,7 +145,7 @@ public sealed class PeerWireTorrentResolver(TorrentLocationService locations)
             infoBytes);
     }
 
-    sealed record CacheEntry(PeerWireTorrentContext? Context, long ExpiresAtTimestamp);
+    sealed record CacheEntry(PeerWireTorrentContext? Context, long ContentLength, string? ContentVersion, long ExpiresAtTimestamp);
 }
 
 public sealed record PeerWireTorrentContext(

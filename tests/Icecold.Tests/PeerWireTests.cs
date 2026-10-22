@@ -622,6 +622,24 @@ public sealed class PeerWireTests : IDisposable
     }
 
     [Fact]
+    public async Task Resolver_Drops_Cached_Result_When_Backing_Content_Changes()
+    {
+        var torrentResult = await BuildTorrentAsync("payload.bin", Encoding.ASCII.GetBytes("hello cache"));
+        await using var db = CreateDb(torrentResult.Torrent, torrentResult.Metadata);
+        await using var provider = CreateProvider(db);
+        var resolver = CreateResolver(provider);
+        var infoHashHex = torrentResult.Torrent.InfoHashHex;
+
+        Assert.NotNull(await resolver.ResolveAsync(infoHashHex, CancellationToken.None));
+
+        var path = Path.Combine(root, "payload.bin");
+        await File.WriteAllBytesAsync(path, Encoding.ASCII.GetBytes("HELLO CACHE"));
+        File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(5));
+
+        Assert.Null(await resolver.ResolveAsync(infoHashHex, CancellationToken.None));
+    }
+
+    [Fact]
     public void ConnectionLimiter_Enforces_Per_Ip_And_Total_Limits()
     {
         var limiter = new PeerWireConnectionLimiter(maxConnections: 3, maxConnectionsPerIp: 2);

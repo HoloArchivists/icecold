@@ -133,6 +133,7 @@ If Icecold receives traffic directly with no proxy, set `ICECOLD_REVERSE_PROXY_E
 - Run a single Icecold instance per database. The tracker peer store is in memory, and on startup Icecold resets every in-progress indexing job to `Pending`, which would take over jobs owned by another live instance.
 - `compose.prod.yaml` maps deployment essentials. Use a Compose override for other app-level settings such as super-seeding, standby mode, indexing concurrency, and tracker limits.
 - Peer-wire uses plain TCP on `ICECOLD_PEERWIRE_PORT` and must be reachable directly by BitTorrent clients, not through an HTTP proxy or CDN. Open it in any host or cloud firewall.
+- Peer-wire limits connections per client address (`PeerWire:MaxConnectionsPerIp`, default 8). If Docker's userland proxy handles the published port (for example IPv6 clients reaching an IPv4-only container), every peer appears to come from the bridge gateway and they all share that limit. If that happens, set `"userland-proxy": false` in the Docker daemon config, or run the API service with `network_mode: host`.
 - The PostgreSQL service uses the `postgres:18` image, which stores data under `/var/lib/postgresql/18/docker` in the volume. Upgrading an existing volume from an older major version needs `pg_upgrade` or a dump and restore.
 - Container logs are rotated by the Docker `json-file` driver (5 × 20 MB per service).
 

@@ -45,13 +45,15 @@ public sealed class IndexingClaimService(IcecoldDbContext db)
     // because a Hashing row can only belong to a worker of a previous (dead) process. There are
     // no claim leases or owner ids, so running more than one Icecold instance against the same
     // database would let a restarting instance steal jobs another live instance is hashing.
-    public async Task ResetInterruptedAsync(CancellationToken cancellationToken)
+    // Only rows claimed before claimedBefore (this process's start) are reset, so claims made by
+    // this process's own workers while the reset is pending or retrying are left alone.
+    public async Task ResetInterruptedAsync(DateTimeOffset claimedBefore, CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
         if (db.Database.IsRelational())
         {
             await db.Torrents
-                .Where(t => t.Status == TorrentStatus.Hashing)
+                .Where(t => t.Status == TorrentStatus.Hashing && t.UpdatedAt < claimedBefore)
                 .ExecuteUpdateAsync(
                     setters => setters
                         .SetProperty(t => t.Status, TorrentStatus.Pending)
@@ -61,7 +63,7 @@ public sealed class IndexingClaimService(IcecoldDbContext db)
         }
 
         var interrupted = await db.Torrents
-            .Where(t => t.Status == TorrentStatus.Hashing)
+            .Where(t => t.Status == TorrentStatus.Hashing && t.UpdatedAt < claimedBefore)
             .ToListAsync(cancellationToken);
 
         foreach (var torrent in interrupted)

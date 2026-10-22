@@ -40,7 +40,7 @@ public sealed class IndexingClaimServiceTests
         await db.SaveChangesAsync();
         var service = new IndexingClaimService(db);
 
-        await service.ResetInterruptedAsync(CancellationToken.None);
+        await service.ResetInterruptedAsync(DateTimeOffset.UtcNow.AddSeconds(1), CancellationToken.None);
         var ids = await service.ListPendingAsync(100, CancellationToken.None);
 
         Assert.Contains(pending.Id, ids);

@@ -28,16 +28,17 @@ public sealed class IndexingWorker(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        var startedAt = DateTimeOffset.UtcNow;
         var concurrency = Math.Max(1, options.Value.Indexing.MaxConcurrency);
         var workers = Enumerable.Range(0, concurrency)
             .Select(_ => RunWorkerAsync(stoppingToken))
             .ToList();
-        workers.Add(SweepPendingAsync(stoppingToken));
+        workers.Add(SweepPendingAsync(startedAt, stoppingToken));
 
         await Task.WhenAll(workers);
     }
 
-    async Task SweepPendingAsync(CancellationToken cancellationToken)
+    async Task SweepPendingAsync(DateTimeOffset startedAt, CancellationToken cancellationToken)
     {
         var interruptedReset = false;
         using var timer = new PeriodicTimer(PendingSweepInterval);
@@ -49,7 +50,7 @@ public sealed class IndexingWorker(
                 var claims = scope.ServiceProvider.GetRequiredService<IndexingClaimService>();
                 if (!interruptedReset)
                 {
-                    await claims.ResetInterruptedAsync(cancellationToken);
+                    await claims.ResetInterruptedAsync(startedAt, cancellationToken);
                     interruptedReset = true;
                 }
 
@@ -300,9 +301,10 @@ public sealed class IndexingWorker(
                 && l.IsPrimary,
             cancellationToken);
 
+    // The row goes back to Pending and is left for the pending sweep rather than re-enqueued
+    // immediately, which spaces full re-hashes out by at least one sweep interval.
     async Task RequeueForRetryAsync(Guid torrentId, string reason, CancellationToken cancellationToken)
     {
-        var requeued = false;
         await UpdateStatusWithRetryAsync(
             torrentId,
             torrent =>
@@ -310,17 +312,13 @@ public sealed class IndexingWorker(
                 if (torrent.Status is TorrentStatus.Ready or TorrentStatus.Duplicate)
                     return false;
 
-                requeued = torrent.Attempts < MaxIndexingAttempts;
+                var requeued = torrent.Attempts < MaxIndexingAttempts;
                 torrent.Status = requeued ? TorrentStatus.Pending : TorrentStatus.Failed;
                 torrent.Error = requeued ? reason : $"{reason} Gave up after {torrent.Attempts} attempts.";
                 torrent.UpdatedAt = DateTimeOffset.UtcNow;
                 return true;
             },
             cancellationToken);
-
-        // Never wait on the queue from inside a worker: if it is full, the pending sweep re-enqueues.
-        if (requeued)
-            queue.TryEnqueue(torrentId);
     }
 
     async Task MarkFailedAsync(Guid torrentId, string error, CancellationToken cancellationToken)
