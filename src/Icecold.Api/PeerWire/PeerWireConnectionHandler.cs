@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Diagnostics;
 using Icecold.Api.Content;
 using Icecold.Api.Options;
 using Icecold.Api.Torrents;
@@ -22,7 +23,19 @@ public sealed class PeerWireConnectionHandler(
     const byte LocalMetadataExtensionId = 1;
     const int MetadataPieceLength = 16 * 1024;
 
-    public async Task HandleAsync(Stream stream, CancellationToken cancellationToken)
+    // Standby status comes from the tracker swarm under its global lock; checking it on
+    // every 16 KiB block is wasteful, so mid-session checks are throttled per connection.
+    internal TimeSpan StandbyRecheckInterval { get; init; } = TimeSpan.FromSeconds(5);
+
+    TimeSpan WriteTimeout => TimeSpan.FromSeconds(options.Value.PeerWire.IdleTimeoutSeconds);
+
+    public Task HandleAsync(Stream stream, CancellationToken cancellationToken)
+        => HandleAsync(
+            stream,
+            PeerWireDeadline.After(TimeSpan.FromSeconds(options.Value.PeerWire.HandshakeTimeoutSeconds)),
+            cancellationToken);
+
+    internal async Task HandleAsync(Stream stream, PeerWireDeadline handshakeDeadline, CancellationToken cancellationToken)
     {
         PeerWireTorrentContext? torrent = null;
         var infoHashHex = "";
@@ -31,7 +44,7 @@ public sealed class PeerWireConnectionHandler(
         PeerWireSuperSeedSession? superSeedSession = null;
         try
         {
-            var handshake = await ReadHandshakeAsync(stream, cancellationToken);
+            var handshake = await ReadHandshakeAsync(stream, handshakeDeadline, cancellationToken);
             if (handshake is null)
             {
                 logger.LogDebug("Peer-wire connection closed before a valid handshake was received.");
@@ -45,6 +58,15 @@ public sealed class PeerWireConnectionHandler(
                 InfoHashUtil.ToHex(handshake.PeerId),
                 handshake.SupportsExtensions);
 
+            if (stream is PeerWireMseStream mse && !string.Equals(mse.InfoHashHex, infoHashHex, StringComparison.OrdinalIgnoreCase))
+            {
+                logger.LogDebug(
+                    "Peer-wire closing MSE connection: handshake infohash {InfoHash} does not match negotiated {MseInfoHash}.",
+                    infoHashHex,
+                    mse.InfoHashHex);
+                return;
+            }
+
             torrent = await torrents.ResolveAsync(infoHashHex, cancellationToken);
             if (torrent is null)
             {
@@ -52,7 +74,7 @@ public sealed class PeerWireConnectionHandler(
                 return;
             }
 
-            if (!ShouldServe(torrent))
+            if (!ShouldServe(torrent, state, force: true))
             {
                 logger.LogDebug("Peer-wire standing down for {InfoHash}: enough external seeders are available.", torrent.InfoHashHex);
                 return;
@@ -117,25 +139,37 @@ public sealed class PeerWireConnectionHandler(
         => superSeed.Enabled
             && (superSeed.MinimumPeerCount == 0 || activePeerCount >= superSeed.MinimumPeerCount);
 
-    bool ShouldServe(PeerWireTorrentContext torrent)
-        => standbyPolicy.ShouldSeed(peerStore.GetSwarmStats(torrent.InfoHashHex));
-
-    async Task<PeerWireHandshake?> ReadHandshakeAsync(Stream stream, CancellationToken cancellationToken)
+    bool ShouldServe(PeerWireTorrentContext torrent, PeerWireSessionState state, bool force = false)
     {
-        var timeout = TimeSpan.FromSeconds(options.Value.PeerWire.HandshakeTimeoutSeconds);
-        var pstrlen = await PeerWireStreamIo.ReadByteAsync(stream, timeout, cancellationToken);
+        if (!force
+            && state.LastStandbyCheckTimestamp != 0
+            && Stopwatch.GetElapsedTime(state.LastStandbyCheckTimestamp) < StandbyRecheckInterval)
+        {
+            return true;
+        }
+
+        state.LastStandbyCheckTimestamp = Stopwatch.GetTimestamp();
+        return standbyPolicy.ShouldSeed(peerStore.GetSwarmStats(torrent.InfoHashHex));
+    }
+
+    static async Task<PeerWireHandshake?> ReadHandshakeAsync(
+        Stream stream,
+        PeerWireDeadline deadline,
+        CancellationToken cancellationToken)
+    {
+        var pstrlen = await PeerWireStreamIo.ReadByteAsync(stream, deadline, cancellationToken);
         if (pstrlen != PeerWireProtocol.ProtocolName.Length)
             return null;
 
         var protocol = new byte[pstrlen];
-        if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, protocol, timeout, cancellationToken))
+        if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, protocol, deadline, cancellationToken))
             return null;
 
         if (!protocol.AsSpan().SequenceEqual(PeerWireProtocol.ProtocolName))
             return null;
 
         var reservedAndHashes = new byte[48];
-        if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, reservedAndHashes, timeout, cancellationToken))
+        if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, reservedAndHashes, deadline, cancellationToken))
             return null;
 
         return new PeerWireHandshake(
@@ -221,7 +255,7 @@ public sealed class PeerWireConnectionHandler(
                     if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, payload, idleTimeout, cancellationToken))
                         return;
 
-                    if (!ShouldServe(torrent))
+                    if (!ShouldServe(torrent, state))
                     {
                         logger.LogDebug("Peer-wire closing {InfoHash}: swarm has enough external seeders.", torrent.InfoHashHex);
                         return;
@@ -284,7 +318,7 @@ public sealed class PeerWireConnectionHandler(
                     if (!await PeerWireStreamIo.ReadExactlyOrFalseAsync(stream, extendedPayload, idleTimeout, cancellationToken))
                         return;
 
-                    if (!ShouldServe(torrent))
+                    if (!ShouldServe(torrent, state))
                     {
                         logger.LogDebug("Peer-wire closing {InfoHash}: swarm has enough external seeders.", torrent.InfoHashHex);
                         return;
@@ -322,7 +356,7 @@ public sealed class PeerWireConnectionHandler(
         handshake[ExtensionProtocolReservedByteIndex] = ExtensionProtocolReservedBit;
         infoHash.CopyTo(handshake.AsSpan(28));
         identity.PeerId.CopyTo(handshake.AsSpan(48));
-        await stream.WriteAsync(handshake, cancellationToken);
+        await PeerWireStreamIo.WriteAsync(stream, handshake, WriteTimeout, cancellationToken);
     }
 
     async Task WriteExtensionHandshakeAsync(
@@ -460,7 +494,7 @@ public sealed class PeerWireConnectionHandler(
             length);
     }
 
-    static async Task WriteMetadataRejectAsync(
+    async Task WriteMetadataRejectAsync(
         Stream stream,
         PeerWireSessionState state,
         long requestedPiece,
@@ -475,7 +509,7 @@ public sealed class PeerWireConnectionHandler(
         await WriteExtendedMessageAsync(stream, state.RemoteMetadataExtensionId ?? LocalMetadataExtensionId, payload, cancellationToken);
     }
 
-    static async Task WriteBitfieldAsync(Stream stream, int pieceCount, CancellationToken cancellationToken)
+    async Task WriteBitfieldAsync(Stream stream, int pieceCount, CancellationToken cancellationToken)
     {
         var bitfield = new byte[(pieceCount + 7) / 8];
         for (var i = 0; i < pieceCount; i++)
@@ -484,7 +518,7 @@ public sealed class PeerWireConnectionHandler(
         await WriteMessageAsync(stream, PeerWireMessageId.Bitfield, bitfield, cancellationToken);
     }
 
-    static async Task WriteHaveMessagesAsync(
+    async Task WriteHaveMessagesAsync(
         Stream stream,
         IReadOnlyList<int> pieceIndexes,
         CancellationToken cancellationToken)
@@ -493,7 +527,7 @@ public sealed class PeerWireConnectionHandler(
             await WriteHaveAsync(stream, pieceIndex, cancellationToken);
     }
 
-    static async Task WriteHaveAsync(Stream stream, int pieceIndex, CancellationToken cancellationToken)
+    async Task WriteHaveAsync(Stream stream, int pieceIndex, CancellationToken cancellationToken)
     {
         var payload = new byte[4];
         BinaryPrimitives.WriteInt32BigEndian(payload, pieceIndex);
@@ -509,14 +543,24 @@ public sealed class PeerWireConnectionHandler(
     {
         const int headerLength = 13;
         var buffer = state.GetBlockBuffer(headerLength + request.Length);
-        await ReadPieceBlockAsync(torrent, state, request, buffer.AsMemory(headerLength, request.Length), cancellationToken);
+        try
+        {
+            await ReadPieceBlockAsync(torrent, state, request, buffer.AsMemory(headerLength, request.Length), cancellationToken);
+        }
+        catch (Exception ex) when (ex is IOException or ContentSourceException or UnauthorizedAccessException)
+        {
+            // The resolved location may be cached; drop it so the peer's reconnect re-resolves
+            // through TorrentLocationService and can fail over to another location.
+            torrents.Invalidate(torrent.InfoHashHex);
+            throw;
+        }
 
         BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(0, 4), 9 + request.Length);
         buffer[4] = (byte)PeerWireMessageId.Piece;
         BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(5, 4), request.PieceIndex);
         BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(9, 4), request.Begin);
 
-        await stream.WriteAsync(buffer.AsMemory(0, headerLength + request.Length), cancellationToken);
+        await PeerWireStreamIo.WriteAsync(stream, buffer.AsMemory(0, headerLength + request.Length), WriteTimeout, cancellationToken);
         logger.LogDebug(
             "Peer-wire piece sent for {InfoHash}: piece {PieceIndex}, begin {Begin}, length {Length}.",
             torrent.InfoHashHex,
@@ -570,7 +614,7 @@ public sealed class PeerWireConnectionHandler(
         }
     }
 
-    static async Task WriteMessageAsync(
+    async Task WriteMessageAsync(
         Stream stream,
         PeerWireMessageId messageId,
         ReadOnlyMemory<byte> payload,
@@ -579,12 +623,12 @@ public sealed class PeerWireConnectionHandler(
         var prefix = new byte[5];
         BinaryPrimitives.WriteInt32BigEndian(prefix.AsSpan(0, 4), payload.Length + 1);
         prefix[4] = (byte)messageId;
-        await stream.WriteAsync(prefix, cancellationToken);
+        await PeerWireStreamIo.WriteAsync(stream, prefix, WriteTimeout, cancellationToken);
         if (payload.Length > 0)
-            await stream.WriteAsync(payload, cancellationToken);
+            await PeerWireStreamIo.WriteAsync(stream, payload, WriteTimeout, cancellationToken);
     }
 
-    static async Task WriteExtendedMessageAsync(
+    async Task WriteExtendedMessageAsync(
         Stream stream,
         byte extensionId,
         ReadOnlyMemory<byte> payload,
@@ -594,9 +638,9 @@ public sealed class PeerWireConnectionHandler(
         BinaryPrimitives.WriteInt32BigEndian(prefix.AsSpan(0, 4), payload.Length + 2);
         prefix[4] = (byte)PeerWireMessageId.Extended;
         prefix[5] = extensionId;
-        await stream.WriteAsync(prefix, cancellationToken);
+        await PeerWireStreamIo.WriteAsync(stream, prefix, WriteTimeout, cancellationToken);
         if (payload.Length > 0)
-            await stream.WriteAsync(payload, cancellationToken);
+            await PeerWireStreamIo.WriteAsync(stream, payload, WriteTimeout, cancellationToken);
     }
 
     static async Task<bool> DrainAsync(
@@ -641,6 +685,8 @@ sealed class PeerWireSessionState : IAsyncDisposable
     Stream? seekableContent;
 
     public byte? RemoteMetadataExtensionId { get; set; }
+
+    public long LastStandbyCheckTimestamp { get; set; }
 
     public byte[] GetBlockBuffer(int length)
     {

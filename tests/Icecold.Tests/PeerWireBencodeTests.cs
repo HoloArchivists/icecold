@@ -15,6 +15,17 @@ public sealed class PeerWireBencodeTests
         Assert.False(PeerWireBencode.TryDecodeDictionary(tooDeep, out _));
     }
 
+    [Fact]
+    public void TryDecodeDictionary_Rejects_Oversized_String_Length()
+    {
+        var oversized = Encoding.ASCII.GetBytes($"d1:a{int.MaxValue}:xe");
+        var nearMax = Encoding.ASCII.GetBytes($"d1:a{int.MaxValue - 2}:xe");
+
+        Assert.False(PeerWireBencode.TryDecodeDictionary(oversized, out _));
+        Assert.False(PeerWireBencode.TryDecodeDictionary(nearMax, out _));
+        Assert.False(PeerWireBencode.TryExtractTorrentInfo(oversized, out _));
+    }
+
     static byte[] BuildNestedListDictionary(int listDepth)
     {
         var builder = new StringBuilder("d1:a");

@@ -187,7 +187,7 @@ public sealed class PeerWireTests : IDisposable
             }
         };
         var peerStore = CreatePeerStore(Options.Create(options));
-        var handler = CreateHandler(provider, options, peerStore: peerStore);
+        var handler = CreateHandler(provider, options, peerStore: peerStore, standbyRecheckInterval: TimeSpan.Zero);
         await using var stream = new DuplexTestStream();
 
         await stream.WriteClientAsync(BuildHandshake(
@@ -515,9 +515,178 @@ public sealed class PeerWireTests : IDisposable
         await handler.HandleAsync(stream, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3));
     }
 
+    [Fact]
+    public void PieceRequest_Rejects_Begin_Past_Piece_Length()
+    {
+        var torrent = new PeerWireTorrentContext(
+            new string('a', 40),
+            new LocalFileContentSource("local", root),
+            "sample.bin",
+            ContentLength: 40,
+            PieceLength: 4,
+            PieceCount: 10,
+            InfoBytes: []);
+
+        Assert.False(PeerWirePieceRequest.TryCreate(torrent, 0, 20, 4, 16 * 1024, out _));
+        Assert.False(PeerWirePieceRequest.TryCreate(torrent, 0, 2, 4, 16 * 1024, out _));
+        Assert.False(PeerWirePieceRequest.TryCreate(torrent, 0, int.MaxValue, 1, 16 * 1024, out _));
+        Assert.True(PeerWirePieceRequest.TryCreate(torrent, 5, 0, 4, 16 * 1024, out var request));
+        Assert.Equal(20, request.Offset);
+    }
+
+    [Fact]
+    public async Task Handler_Enforces_Overall_Handshake_Deadline_For_Dribbled_Bytes()
+    {
+        var torrentResult = await BuildTorrentAsync("payload.bin", Encoding.ASCII.GetBytes("hello dribble"));
+        await using var db = CreateDb(torrentResult.Torrent, torrentResult.Metadata);
+        await using var provider = CreateProvider(db);
+        var handler = CreateHandler(
+            provider,
+            new IcecoldOptions { PeerWire = new PeerWireOptions { Enabled = true, HandshakeTimeoutSeconds = 1 } });
+
+        // Each byte arrives well inside the per-read timeout, but the full handshake would take ~13s.
+        await using var stream = new DribblingReadStream(
+            BuildHandshake(Convert.FromHexString(torrentResult.Torrent.InfoHashHex), Enumerable.Repeat((byte)'D', 20).ToArray()),
+            TimeSpan.FromMilliseconds(200));
+
+        await handler.HandleAsync(stream, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(4));
+        Assert.True(stream.BytesRead < 68);
+    }
+
+    [Fact]
+    public async Task TransportNegotiator_Enforces_Overall_Deadline_For_Dribbled_Mse_Bytes()
+    {
+        await using var db = CreateEmptyDb();
+        await using var provider = CreateProvider(db);
+        var negotiator = new PeerWireTransportNegotiator(
+            CreateResolver(provider),
+            Options.Create(new IcecoldOptions { PeerWire = new PeerWireOptions { HandshakeTimeoutSeconds = 1 } }),
+            NullLogger<PeerWireTransportNegotiator>.Instance);
+        await using var stream = new DribblingReadStream(
+            Enumerable.Repeat((byte)7, PeerWireMse.KeySize + PeerWireMse.MaxPadLength + 20).ToArray(),
+            TimeSpan.FromMilliseconds(50));
+
+        var negotiated = await negotiator.NegotiateAsync(stream, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(4));
+
+        Assert.Null(negotiated);
+    }
+
+    [Fact]
+    public async Task Handler_Closes_Mse_Connection_When_Handshake_InfoHash_Differs()
+    {
+        var negotiatedTorrent = await BuildTorrentAsync("first.bin", Encoding.ASCII.GetBytes("first torrent content"));
+        var otherTorrent = await BuildTorrentAsync("second.bin", Encoding.ASCII.GetBytes("second torrent content"));
+        await using var db = CreateDb(negotiatedTorrent.Torrent, negotiatedTorrent.Metadata);
+        AddTorrent(db, otherTorrent.Torrent, otherTorrent.Metadata);
+        await using var provider = CreateProvider(db);
+        var handler = CreateHandler(
+            provider,
+            new IcecoldOptions { PeerWire = new PeerWireOptions { Enabled = true } });
+        var negotiator = CreateTransportNegotiator(provider);
+        await using var stream = new DuplexTestStream();
+
+        var handling = Task.Run(async () =>
+        {
+            await using var peerWireStream = await negotiator.NegotiateAsync(stream.ServerStream, CancellationToken.None);
+            Assert.NotNull(peerWireStream);
+            await handler.HandleAsync(peerWireStream, CancellationToken.None);
+        });
+
+        _ = await CompleteMseHandshakeAsync(
+            stream,
+            negotiatedTorrent.Torrent.InfoHashHex,
+            BuildHandshake(Convert.FromHexString(otherTorrent.Torrent.InfoHashHex), Enumerable.Repeat((byte)'X', 20).ToArray()));
+
+        // A matching handshake would be answered and then wait in the message loop for input.
+        await handling.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task Resolver_Caches_Results_Until_Invalidated()
+    {
+        var torrentResult = await BuildTorrentAsync("payload.bin", Encoding.ASCII.GetBytes("hello cache"));
+        await using var db = CreateDb(torrentResult.Torrent, torrentResult.Metadata);
+        await using var provider = CreateProvider(db);
+        var resolver = CreateResolver(provider);
+        var infoHashHex = torrentResult.Torrent.InfoHashHex;
+
+        Assert.NotNull(await resolver.ResolveAsync(infoHashHex, CancellationToken.None));
+        Assert.Null(await resolver.ResolveAsync(new string('0', 40), CancellationToken.None));
+
+        db.Torrents.RemoveRange(db.Torrents);
+        db.SaveChanges();
+        Assert.NotNull(await resolver.ResolveAsync(infoHashHex, CancellationToken.None));
+
+        resolver.Invalidate(infoHashHex);
+        Assert.Null(await resolver.ResolveAsync(infoHashHex, CancellationToken.None));
+    }
+
+    [Fact]
+    public void ConnectionLimiter_Enforces_Per_Ip_And_Total_Limits()
+    {
+        var limiter = new PeerWireConnectionLimiter(maxConnections: 3, maxConnectionsPerIp: 2);
+        var first = IPAddress.Parse("192.0.2.1");
+        var second = IPAddress.Parse("192.0.2.2");
+        var third = IPAddress.Parse("192.0.2.3");
+
+        Assert.True(limiter.TryAcquire(first));
+        Assert.True(limiter.TryAcquire(IPAddress.Parse("::ffff:192.0.2.1")));
+        Assert.False(limiter.TryAcquire(first));
+
+        Assert.True(limiter.TryAcquire(second));
+        Assert.False(limiter.TryAcquire(third));
+
+        limiter.Release(first);
+        Assert.True(limiter.TryAcquire(third));
+        Assert.False(limiter.TryAcquire(second));
+
+        var ipv6 = new PeerWireConnectionLimiter(4, 1);
+        Assert.True(ipv6.TryAcquire(IPAddress.Parse("2001:db8::1")));
+        Assert.False(ipv6.TryAcquire(IPAddress.Parse("2001:db8::2")));
+        Assert.True(ipv6.TryAcquire(IPAddress.Parse("2001:db8:0:1::1")));
+    }
+
+    [Fact]
+    public void SuperSeed_Piece_Progress_Merges_And_Bounds_Ranges()
+    {
+        var progress = new PeerWireSuperSeedCoordinator.PieceProgress();
+        const int pieceLength = 1024 * 1024;
+        for (var i = 0; i < 10000; i++)
+            Assert.False(progress.Add(0, 1, pieceLength));
+        Assert.Equal(1, progress.RangeCount);
+
+        for (var i = 0; i < PeerWireSuperSeedCoordinator.PieceProgress.MaxRanges * 2; i++)
+            Assert.False(progress.Add(i * 4 + 8, i * 4 + 9, pieceLength));
+        Assert.Equal(PeerWireSuperSeedCoordinator.PieceProgress.MaxRanges, progress.RangeCount);
+
+        Assert.True(progress.Add(0, pieceLength, pieceLength));
+        Assert.Equal(1, progress.RangeCount);
+
+        var ordered = new PeerWireSuperSeedCoordinator.PieceProgress();
+        Assert.False(ordered.Add(8, 12, 12));
+        Assert.False(ordered.Add(0, 4, 12));
+        Assert.True(ordered.Add(4, 8, 12));
+    }
+
+    async Task<(TorrentBuildResult Torrent, ContentMetadata Metadata)> BuildTorrentAsync(string fileName, byte[] content)
+    {
+        await File.WriteAllBytesAsync(Path.Combine(root, fileName), content);
+        var source = new LocalFileContentSource("local", root);
+        var metadata = await source.GetMetadataAsync(fileName, CancellationToken.None);
+        var torrentResult = await new TorrentBuilder(new PublicUrlBuilder(Options.Create(new IcecoldOptions { PublicBaseUrl = "http://example.test" })))
+            .BuildSingleFileAsync(metadata, source, null, CancellationToken.None);
+        return (torrentResult, metadata);
+    }
+
     IcecoldDbContext CreateDb(TorrentBuildResult torrentResult, ContentMetadata metadata)
     {
         var db = CreateEmptyDb();
+        AddTorrent(db, torrentResult, metadata);
+        return db;
+    }
+
+    static void AddTorrent(IcecoldDbContext db, TorrentBuildResult torrentResult, ContentMetadata metadata)
+    {
         var now = DateTimeOffset.UtcNow;
         var torrent = new TorrentRecord
         {
@@ -555,7 +724,6 @@ public sealed class PeerWireTests : IDisposable
             UpdatedAt = now
         });
         db.SaveChanges();
-        return db;
     }
 
     static IcecoldDbContext CreateEmptyDb()
@@ -596,7 +764,8 @@ public sealed class PeerWireTests : IDisposable
         ServiceProvider provider,
         IcecoldOptions options,
         PeerWireSuperSeedCoordinator? superSeedCoordinator = null,
-        ITrackerPeerStore? peerStore = null)
+        ITrackerPeerStore? peerStore = null,
+        TimeSpan? standbyRecheckInterval = null)
     {
         var wrappedOptions = Options.Create(options);
         return new PeerWireConnectionHandler(
@@ -606,7 +775,10 @@ public sealed class PeerWireTests : IDisposable
             peerStore ?? CreatePeerStore(wrappedOptions),
             new PeerWireStandbyPolicy(wrappedOptions),
             wrappedOptions,
-            NullLogger<PeerWireConnectionHandler>.Instance);
+            NullLogger<PeerWireConnectionHandler>.Instance)
+        {
+            StandbyRecheckInterval = standbyRecheckInterval ?? TimeSpan.FromSeconds(5)
+        };
     }
 
     static InMemoryTrackerPeerStore CreatePeerStore(IOptions<IcecoldOptions> options)
@@ -884,6 +1056,56 @@ public sealed class PeerWireTests : IDisposable
 
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             return 0;
+        }
+
+        public override long Seek(long offset, SeekOrigin origin)
+            => throw new NotSupportedException();
+
+        public override void SetLength(long value)
+            => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) { }
+
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+            => ValueTask.CompletedTask;
+    }
+
+    sealed class DribblingReadStream(byte[] bytes, TimeSpan delayPerByte) : Stream
+    {
+        int position;
+
+        public int BytesRead => position;
+
+        public override bool CanRead => true;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => true;
+
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush() { }
+
+        public override int Read(byte[] buffer, int offset, int count)
+            => throw new NotSupportedException();
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (position >= bytes.Length)
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return 0;
+            }
+
+            await Task.Delay(delayPerByte, cancellationToken);
+            buffer.Span[0] = bytes[position++];
+            return 1;
         }
 
         public override long Seek(long offset, SeekOrigin origin)

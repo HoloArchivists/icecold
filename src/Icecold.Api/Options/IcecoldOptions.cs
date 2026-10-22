@@ -109,6 +109,8 @@ public sealed class PeerWireOptions
 
     public int MaxConnections { get; set; } = 128;
 
+    public int MaxConnectionsPerIp { get; set; } = 8;
+
     public int HandshakeTimeoutSeconds { get; set; } = 15;
 
     public int IdleTimeoutSeconds { get; set; } = 120;
