@@ -33,8 +33,7 @@ public sealed class PeerWireTests : IDisposable
         var torrent = new PeerWireTorrentContext(
             new string('a', 40),
             new LocalFileContentSource("local", root),
-            "sample.bin",
-            ContentLength: 10,
+            TorrentContentLayout.SingleFile("sample.bin", 10, null),
             PieceLength: 4,
             PieceCount: 3,
             InfoBytes: []);
@@ -116,6 +115,54 @@ public sealed class PeerWireTests : IDisposable
         Assert.Equal(0, BinaryPrimitives.ReadInt32BigEndian(piece.Payload.AsSpan(0, 4)));
         Assert.Equal(6, BinaryPrimitives.ReadInt32BigEndian(piece.Payload.AsSpan(4, 4)));
         Assert.Equal("peer", Encoding.ASCII.GetString(piece.Payload.AsSpan(8)));
+
+        stream.CompleteClientWrites();
+        await handling.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task Handler_Serves_Multi_File_Blocks_Across_Padding()
+    {
+        var first = Enumerable.Range(0, 300_000).Select(i => (byte)(i % 251 + 1)).ToArray();
+        var second = Encoding.ASCII.GetBytes("second file bytes");
+        await File.WriteAllBytesAsync(Path.Combine(root, "first.bin"), first);
+        await File.WriteAllBytesAsync(Path.Combine(root, "second.bin"), second);
+        var source = new LocalFileContentSource("local", root);
+        var entries = new List<MultiFileTorrentEntry>
+        {
+            new(await source.GetMetadataAsync("first.bin", CancellationToken.None), "first.bin"),
+            new(await source.GetMetadataAsync("second.bin", CancellationToken.None), "nested/second.bin")
+        };
+        var torrentResult = await new TorrentBuilder(new PublicUrlBuilder(Options.Create(new IcecoldOptions { PublicBaseUrl = "http://example.test" })))
+            .BuildMultiFileAsync("Set", entries, source, CancellationToken.None);
+        Assert.Equal(256 * 1024, torrentResult.PieceLength);
+        await using var db = CreateEmptyDb();
+        AddMultiFileTorrent(db, torrentResult, entries);
+        await using var provider = CreateProvider(db);
+        var handler = CreateHandler(
+            provider,
+            new IcecoldOptions { PeerWire = new PeerWireOptions { Enabled = true, MaxBlockLength = 16 * 1024 } });
+        await using var stream = new DuplexTestStream();
+
+        await stream.WriteClientAsync(BuildHandshake(Convert.FromHexString(torrentResult.InfoHashHex), Enumerable.Repeat((byte)'P', 20).ToArray()));
+        var handling = handler.HandleAsync(stream.ServerStream, CancellationToken.None);
+        await stream.ReadClientAsync(68);
+        Assert.Equal(5, (await ReadMessageAsync(stream)).Id);
+        Assert.Equal(1, (await ReadMessageAsync(stream)).Id);
+        await stream.WriteClientAsync(BuildInterested());
+
+        // Piece 1 holds the tail of first.bin (37,856 bytes) followed by zero padding.
+        await stream.WriteClientAsync(BuildRequest(pieceIndex: 1, begin: 37_000, length: 1_000));
+        var spanning = await ReadMessageAsync(stream);
+        Assert.Equal(7, spanning.Id);
+        var expected = new byte[1_000];
+        first.AsSpan(262_144 + 37_000, 856).CopyTo(expected);
+        Assert.Equal(expected, spanning.Payload[8..]);
+
+        // second.bin starts on the next piece boundary.
+        await stream.WriteClientAsync(BuildRequest(pieceIndex: 2, begin: 0, length: second.Length));
+        var secondPiece = await ReadMessageAsync(stream);
+        Assert.Equal(second, secondPiece.Payload[8..]);
 
         stream.CompleteClientWrites();
         await handling.WaitAsync(TimeSpan.FromSeconds(2));
@@ -521,8 +568,7 @@ public sealed class PeerWireTests : IDisposable
         var torrent = new PeerWireTorrentContext(
             new string('a', 40),
             new LocalFileContentSource("local", root),
-            "sample.bin",
-            ContentLength: 40,
+            TorrentContentLayout.SingleFile("sample.bin", 40, null),
             PieceLength: 4,
             PieceCount: 10,
             InfoBytes: []);
@@ -740,6 +786,44 @@ public sealed class PeerWireTests : IDisposable
             LastVerifiedAt = now,
             CreatedAt = now,
             UpdatedAt = now
+        });
+        db.SaveChanges();
+    }
+
+    static void AddMultiFileTorrent(IcecoldDbContext db, TorrentBuildResult torrentResult, IReadOnlyList<MultiFileTorrentEntry> entries)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var id = Guid.NewGuid();
+        db.Torrents.Add(new TorrentRecord
+        {
+            Id = id,
+            SourceName = "local",
+            SourcePath = "manifest:test",
+            DisplayName = "Set",
+            ContentLength = entries.Sum(e => e.Metadata.Length),
+            ContentVersion = "test",
+            IsMultiFile = true,
+            Status = TorrentStatus.Ready,
+            InfoHashHex = torrentResult.InfoHashHex,
+            MseObfuscatedHashHex = PeerWireMse.HashReq2Hex(torrentResult.InfoHashHex),
+            PieceLength = torrentResult.PieceLength,
+            PieceCount = torrentResult.PieceCount,
+            TorrentBytes = torrentResult.TorrentBytes,
+            CreatedAt = now,
+            UpdatedAt = now,
+            CompletedAt = now,
+            Files = entries
+                .Select((e, index) => new TorrentFileRecord
+                {
+                    Id = Guid.NewGuid(),
+                    TorrentId = id,
+                    Index = index,
+                    SourcePath = e.Metadata.Path,
+                    TorrentPath = e.TorrentPath,
+                    ContentLength = e.Metadata.Length,
+                    ContentVersion = e.Metadata.Version
+                })
+                .ToList()
         });
         db.SaveChanges();
     }

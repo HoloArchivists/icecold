@@ -13,7 +13,7 @@ public sealed class PeerWireTorrentResolver(TorrentLocationService locations)
 
     // Every peer-wire connection would otherwise cost a DB query, a content stat and a SHA-1 of
     // the info dictionary. Results (including misses) are reused briefly. Hits still re-stat the
-    // backing file so rewritten content falls through to a full resolve (which marks it Stale),
+    // backing files so rewritten content falls through to a full resolve (which marks it Stale),
     // and a location that fails to read is invalidated by the handler so the next connection
     // re-resolves and fails over. Admin location changes take effect within one TTL.
     internal TimeSpan CacheTtl { get; init; } = TimeSpan.FromSeconds(10);
@@ -27,7 +27,7 @@ public sealed class PeerWireTorrentResolver(TorrentLocationService locations)
 
         var resolved = await locations.ResolveByInfoHashAsync(normalized, cancellationToken);
         var context = BuildContext(resolved, normalized);
-        Store(key, context, resolved?.Metadata);
+        Store(key, context);
         return context;
     }
 
@@ -40,11 +40,11 @@ public sealed class PeerWireTorrentResolver(TorrentLocationService locations)
 
         var resolved = await locations.ResolveByMseObfuscatedHashAsync(normalized, cancellationToken);
         var context = BuildContext(resolved, resolved?.Torrent.InfoHashHex?.ToLowerInvariant());
-        Store(key, context, resolved?.Metadata);
+        Store(key, context);
 
         // The plaintext handshake inside the MSE stream resolves the same torrent by infohash next.
         if (context is not null)
-            Store(InfoHashKey(context.InfoHashHex.ToLowerInvariant()), context, resolved!.Metadata);
+            Store(InfoHashKey(context.InfoHashHex.ToLowerInvariant()), context);
 
         return context;
     }
@@ -85,8 +85,7 @@ public sealed class PeerWireTorrentResolver(TorrentLocationService locations)
 
         try
         {
-            var metadata = await entry.Context.Source.GetMetadataAsync(entry.Context.SourcePath, cancellationToken);
-            if (metadata.Length == entry.ContentLength && metadata.Version == entry.ContentVersion)
+            if (await entry.Context.Layout.FindChangedFileAsync(entry.Context.Source, cancellationToken) is null)
                 return entry;
         }
         catch (Exception ex) when (ex is ContentSourceException or IOException or UnauthorizedAccessException)
@@ -97,7 +96,7 @@ public sealed class PeerWireTorrentResolver(TorrentLocationService locations)
         return null;
     }
 
-    void Store(string key, PeerWireTorrentContext? context, ContentMetadata? metadata)
+    void Store(string key, PeerWireTorrentContext? context)
     {
         if (CacheTtl <= TimeSpan.Zero)
             return;
@@ -117,7 +116,7 @@ public sealed class PeerWireTorrentResolver(TorrentLocationService locations)
                     cache.Clear();
             }
 
-            cache[key] = new CacheEntry(context, metadata?.Length ?? 0, metadata?.Version, expiresAt);
+            cache[key] = new CacheEntry(context, expiresAt);
         }
     }
 
@@ -138,21 +137,23 @@ public sealed class PeerWireTorrentResolver(TorrentLocationService locations)
         return new PeerWireTorrentContext(
             torrent.InfoHashHex!,
             resolved!.Source,
-            resolved.Metadata.Path,
-            torrent.ContentLength,
+            resolved.Layout,
             torrent.PieceLength.Value,
             torrent.PieceCount.Value,
             infoBytes);
     }
 
-    sealed record CacheEntry(PeerWireTorrentContext? Context, long ContentLength, string? ContentVersion, long ExpiresAtTimestamp);
+    sealed record CacheEntry(PeerWireTorrentContext? Context, long ExpiresAtTimestamp);
 }
 
 public sealed record PeerWireTorrentContext(
     string InfoHashHex,
     IContentSource Source,
-    string SourcePath,
-    long ContentLength,
+    TorrentContentLayout Layout,
     int PieceLength,
     int PieceCount,
-    byte[] InfoBytes);
+    byte[] InfoBytes)
+{
+    // Length of the torrent's byte space, including multi-file padding.
+    public long ContentLength => Layout.TotalLength;
+}

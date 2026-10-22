@@ -39,8 +39,8 @@ public sealed record TorrentLocationResponse(
 }
 
 public sealed record AddTorrentLocationRequest(
-    [property: Required, MaxLength(128)] string Source,
-    [property: Required, MaxLength(4096)] string Path,
+    [Required, MaxLength(128)] string Source,
+    [Required, MaxLength(4096)] string Path,
     bool MakePrimary = false,
     int? Priority = null);
 
@@ -57,8 +57,10 @@ public enum TorrentLocationOperationStatus
     Conflict
 }
 
+// Layout maps the torrent's bytes onto files of Source, all verified against their recorded
+// length and version when the location was resolved.
 public sealed record TorrentServingLocation(
     TorrentRecord Torrent,
     TorrentLocationRecord Location,
     IContentSource Source,
-    ContentMetadata Metadata);
+    TorrentContentLayout Layout);

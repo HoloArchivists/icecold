@@ -50,6 +50,9 @@ public sealed class TorrentLocationService(
         if (torrent.Status != TorrentStatus.Ready || torrent.InfoHashHex is null || torrent.TorrentBytes is null)
             return Conflict("Locations can only be added to a ready torrent.");
 
+        if (torrent.IsMultiFile)
+            return Conflict("Multi-file torrents are served from their indexed files and do not support additional locations.");
+
         IContentSource source;
         ContentMetadata metadata;
         try
@@ -263,9 +266,13 @@ public sealed class TorrentLocationService(
         var db = scope.ServiceProvider.GetRequiredService<IcecoldDbContext>();
         var readyTorrent = await db.Torrents.AsNoTracking()
             .Include(t => t.Locations)
+            .Include(t => t.Files)
             .FirstOrDefaultAsync(predicate, cancellationToken);
         if (readyTorrent is null)
             return null;
+
+        if (readyTorrent.IsMultiFile)
+            return await ResolveMultiFileAsync(readyTorrent, cancellationToken, excludedLocationIds);
 
         foreach (var location in CandidateLocations(readyTorrent, excludedLocationIds))
         {
@@ -286,7 +293,11 @@ public sealed class TorrentLocationService(
                 if (ShouldRefreshHealthyLocation(location))
                     await MarkLocationHealthyAsync(location.Id, cancellationToken);
 
-                return new TorrentServingLocation(readyTorrent, location, source, metadata);
+                return new TorrentServingLocation(
+                    readyTorrent,
+                    location,
+                    source,
+                    TorrentContentLayout.SingleFile(metadata.Path, metadata.Length, metadata.Version));
             }
             catch (Exception ex) when (IsContentAccessFailure(ex))
             {
@@ -308,6 +319,61 @@ public sealed class TorrentLocationService(
 
         return null;
     }
+
+    // A multi-file torrent has one implicit location: its indexed files on the torrent's source.
+    // There is nothing to fail over to, so a changed or unreadable file makes it unavailable.
+    async Task<TorrentServingLocation?> ResolveMultiFileAsync(
+        TorrentRecord torrent,
+        CancellationToken cancellationToken,
+        IReadOnlySet<Guid>? excludedLocationIds)
+    {
+        if (excludedLocationIds?.Contains(Guid.Empty) == true || torrent.PieceLength is not { } pieceLength)
+            return null;
+
+        var layout = TorrentContentLayout.MultiFile(
+            torrent.Files
+                .OrderBy(f => f.Index)
+                .Select(f => new TorrentContentFileSpec(f.SourcePath, f.TorrentPath, f.ContentLength, f.ContentVersion))
+                .ToList(),
+            pieceLength);
+
+        try
+        {
+            var source = sources.GetRequired(torrent.SourceName);
+            if (await layout.FindChangedFileAsync(source, cancellationToken) is { } changed)
+            {
+                logger.LogWarning(
+                    "Multi-file torrent {TorrentId} is unavailable: '{SourcePath}' changed since it was indexed.",
+                    torrent.Id,
+                    changed.SourcePath);
+                return null;
+            }
+
+            return new TorrentServingLocation(torrent, ImplicitLocation(torrent), source, layout);
+        }
+        catch (Exception ex) when (IsContentAccessFailure(ex))
+        {
+            logger.LogWarning(ex, "Multi-file torrent {TorrentId} is unavailable.", torrent.Id);
+            return null;
+        }
+    }
+
+    static TorrentLocationRecord ImplicitLocation(TorrentRecord torrent)
+        => new()
+        {
+            Id = Guid.Empty,
+            TorrentId = torrent.Id,
+            SourceName = torrent.SourceName,
+            SourcePath = torrent.SourcePath,
+            ContentLength = torrent.ContentLength,
+            ContentVersion = torrent.ContentVersion,
+            ContentLastModified = torrent.ContentLastModified,
+            Status = TorrentLocationStatus.Active,
+            IsPrimary = true,
+            Priority = 0,
+            CreatedAt = torrent.CreatedAt,
+            UpdatedAt = torrent.UpdatedAt
+        };
 
     static IEnumerable<TorrentLocationRecord> CandidateLocations(
         TorrentRecord torrent,
@@ -333,24 +399,7 @@ public sealed class TorrentLocationService(
             || excludedLocationIds?.Contains(Guid.Empty) == true)
             return [];
 
-        return
-        [
-            new TorrentLocationRecord
-            {
-                Id = Guid.Empty,
-                TorrentId = torrent.Id,
-                SourceName = torrent.SourceName,
-                SourcePath = torrent.SourcePath,
-                ContentLength = torrent.ContentLength,
-                ContentVersion = torrent.ContentVersion,
-                ContentLastModified = torrent.ContentLastModified,
-                Status = TorrentLocationStatus.Active,
-                IsPrimary = true,
-                Priority = 0,
-                CreatedAt = torrent.CreatedAt,
-                UpdatedAt = torrent.UpdatedAt
-            }
-        ];
+        return [ImplicitLocation(torrent)];
     }
 
     async Task MarkLocationHealthyAsync(Guid locationId, CancellationToken cancellationToken)

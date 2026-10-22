@@ -171,6 +171,78 @@ public sealed class PostgresIndexingQueueTests : IAsyncLifetime
         }
     }
 
+    [Fact]
+    public async Task Worker_Indexes_Multi_File_Submission_On_PostgreSQL()
+    {
+        await File.WriteAllTextAsync(Path.Combine(root, "a.bin"), "first postgres file");
+        await File.WriteAllTextAsync(Path.Combine(root, "b.bin"), "second");
+        var options = Options.Create(new IcecoldOptions
+        {
+            PublicBaseUrl = "http://example.test",
+            ContentSources = [new ContentSourceOptions { Name = "local", Type = "local", RootPath = root }]
+        });
+        var registry = new ContentSourceRegistry(options, new TestWebHostEnvironment(root));
+        var command = new IndexFilesCommand("local", "Pair", [new IndexFilesEntry("a.bin"), new IndexFilesEntry("b.bin", "sub/b.bin")]);
+
+        Guid id;
+        await using (var scope = provider.CreateAsyncScope())
+        {
+            var service = new IndexFileService(registry, scope.ServiceProvider.GetRequiredService<IcecoldDbContext>(), new IndexingSignal());
+            var submitted = await service.SubmitFilesAsync(command, CancellationToken.None);
+            Assert.Equal(IndexFileSubmissionStatus.Accepted, submitted.Status);
+            id = submitted.Torrent!.Id;
+        }
+
+        using var worker = new IndexingWorker(
+            new IndexingSignal(),
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            registry,
+            new TorrentBuilder(new PublicUrlBuilder(options)),
+            options,
+            NullLogger<IndexingWorker>.Instance)
+        {
+            PollInterval = TimeSpan.FromMilliseconds(20)
+        };
+
+        await worker.StartAsync(CancellationToken.None);
+        try
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(30);
+            while (DateTime.UtcNow < deadline)
+            {
+                await using var scope = provider.CreateAsyncScope();
+                var torrent = await scope.ServiceProvider.GetRequiredService<IcecoldDbContext>()
+                    .Torrents.AsNoTracking().Include(t => t.Locations).Include(t => t.Files).SingleAsync(t => t.Id == id);
+                if (torrent.Status == TorrentStatus.Ready)
+                {
+                    Assert.True(torrent.IsMultiFile);
+                    Assert.NotNull(torrent.InfoHashHex);
+                    Assert.Equal(25, torrent.HashedBytes);
+                    Assert.Empty(torrent.Locations);
+                    Assert.Equal(["a.bin", "sub/b.bin"], torrent.Files.OrderBy(f => f.Index).Select(f => f.TorrentPath).ToArray());
+                    break;
+                }
+
+                Assert.NotEqual(TorrentStatus.Failed, torrent.Status);
+                await Task.Delay(25);
+            }
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+
+        // The manifest identity is covered by IX_torrents_ContentIdentity, so a resubmission is a no-op.
+        await using (var scope = provider.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<IcecoldDbContext>();
+            var resubmitted = await new IndexFileService(registry, db, new IndexingSignal()).SubmitFilesAsync(command, CancellationToken.None);
+            Assert.Equal(IndexFileSubmissionStatus.Completed, resubmitted.Status);
+            Assert.Equal(id, resubmitted.Torrent!.Id);
+            Assert.Equal(TorrentStatus.Ready, (await db.Torrents.AsNoTracking().SingleAsync(t => t.Id == id)).Status);
+        }
+    }
+
     async Task<Guid> SeedAsync(
         TorrentStatus status,
         int priority = 0,

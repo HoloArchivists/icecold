@@ -31,15 +31,19 @@ public sealed class PublicUrlBuilder(IOptions<IcecoldOptions> options)
             yield return TrackerAnnounceUrl;
     }
 
-    public string BuildWebSeedUrl(string infoHashHex, string displayName)
-        => $"{webSeedPublicBaseUrl}/webseed/{infoHashHex}/{Uri.EscapeDataString(displayName)}";
+    // BEP 19: a single-file URL names the file itself; a multi-file URL is a directory (trailing
+    // slash) to which clients append the torrent name and each file's path.
+    public string BuildWebSeedUrl(string infoHashHex, string displayName, bool multiFile = false)
+        => multiFile
+            ? $"{webSeedPublicBaseUrl}/webseed/{infoHashHex}/"
+            : $"{webSeedPublicBaseUrl}/webseed/{infoHashHex}/{Uri.EscapeDataString(displayName)}";
 
     public string BuildMagnet(TorrentRecord torrent)
     {
         if (string.IsNullOrWhiteSpace(torrent.InfoHashHex))
             throw new InvalidOperationException("Torrent does not have an info hash yet.");
 
-        var webSeed = BuildWebSeedUrl(torrent.InfoHashHex, torrent.DisplayName);
+        var webSeed = BuildWebSeedUrl(torrent.InfoHashHex, torrent.DisplayName, torrent.IsMultiFile);
         return "magnet:?xt=urn:btih:" + Uri.EscapeDataString(torrent.InfoHashHex)
             + "&dn=" + Uri.EscapeDataString(torrent.DisplayName)
             + "&xl=" + torrent.ContentLength

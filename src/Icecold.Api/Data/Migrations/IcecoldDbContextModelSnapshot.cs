@@ -22,6 +22,46 @@ namespace Icecold.Api.Data.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("Icecold.Api.Data.TorrentFileRecord", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("ContentLastModified")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long>("ContentLength")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("ContentVersion")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<int>("Index")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("SourcePath")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
+                    b.Property<Guid>("TorrentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("TorrentPath")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TorrentId", "Index")
+                        .IsUnique();
+
+                    b.ToTable("torrent_files", (string)null);
+                });
+
             modelBuilder.Entity("Icecold.Api.Data.TorrentLocationRecord", b =>
                 {
                     b.Property<Guid>("Id")
@@ -145,6 +185,9 @@ namespace Icecold.Api.Data.Migrations
                         .HasMaxLength(40)
                         .HasColumnType("character varying(40)");
 
+                    b.Property<bool>("IsMultiFile")
+                        .HasColumnType("boolean");
+
                     b.Property<DateTimeOffset?>("LeaseExpiresAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -219,6 +262,15 @@ namespace Icecold.Api.Data.Migrations
                     b.ToTable("torrents", (string)null);
                 });
 
+            modelBuilder.Entity("Icecold.Api.Data.TorrentFileRecord", b =>
+                {
+                    b.HasOne("Icecold.Api.Data.TorrentRecord", null)
+                        .WithMany("Files")
+                        .HasForeignKey("TorrentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("Icecold.Api.Data.TorrentLocationRecord", b =>
                 {
                     b.HasOne("Icecold.Api.Data.TorrentRecord", "Torrent")
@@ -240,6 +292,8 @@ namespace Icecold.Api.Data.Migrations
 
             modelBuilder.Entity("Icecold.Api.Data.TorrentRecord", b =>
                 {
+                    b.Navigation("Files");
+
                     b.Navigation("Locations");
                 });
 #pragma warning restore 612, 618

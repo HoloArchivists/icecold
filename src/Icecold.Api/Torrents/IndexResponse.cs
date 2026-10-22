@@ -17,9 +17,10 @@ public sealed record IndexResponse(
     int? PieceLength,
     int? PieceCount,
     string? Error,
-    IReadOnlyList<TorrentLocationResponse> Locations)
+    IReadOnlyList<TorrentLocationResponse> Locations,
+    IReadOnlyList<TorrentFileResponse>? Files)
 {
-    // QueuePosition counts the Pending jobs ahead of this one; HashedBytes is set while Hashing and
+    // Files is set for multi-file torrents only. QueuePosition counts the Pending jobs ahead of this one; HashedBytes is set while Hashing and
     // is persisted every few seconds by the worker that holds the job.
     public static IndexResponse From(TorrentRecord torrent, int? queuePosition = null)
         => new(
@@ -42,5 +43,13 @@ public sealed record IndexResponse(
                 .ThenBy(l => l.Priority)
                 .ThenBy(l => l.CreatedAt)
                 .Select(TorrentLocationResponse.From)
-                .ToList());
+                .ToList(),
+            torrent.IsMultiFile
+                ? torrent.Files
+                    .OrderBy(f => f.Index)
+                    .Select(f => new TorrentFileResponse(f.SourcePath, f.TorrentPath, f.ContentLength))
+                    .ToList()
+                : null);
 }
+
+public sealed record TorrentFileResponse(string Path, string TorrentPath, long ContentLength);

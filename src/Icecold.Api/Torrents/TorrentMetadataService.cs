@@ -46,7 +46,7 @@ public sealed class TorrentMetadataService(IcecoldDbContext db, PublicUrlBuilder
             decoded.Remove(announceListKey);
 
         if (urls.WebSeedEnabled)
-            decoded[webSeedKey] = new BEncodedString(urls.BuildWebSeedUrl(torrent.InfoHashHex!, torrent.DisplayName));
+            decoded[webSeedKey] = new BEncodedString(urls.BuildWebSeedUrl(torrent.InfoHashHex!, torrent.DisplayName, torrent.IsMultiFile));
         else
             decoded.Remove(webSeedKey);
 

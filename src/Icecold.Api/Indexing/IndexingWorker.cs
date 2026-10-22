@@ -116,16 +116,9 @@ public sealed class IndexingWorker(
                 try
                 {
                     var source = sources.GetRequired(torrent.SourceName);
-                    var metadata = await source.GetMetadataAsync(torrent.SourcePath, lease.Token);
-                    if (metadata.Length != torrent.ContentLength || metadata.Version != torrent.ContentVersion)
-                        throw new ContentSourceException("Content metadata changed since the indexing request was accepted.");
-
-                    result = await torrentBuilder.BuildSingleFileAsync(
-                        metadata,
-                        source,
-                        torrent.DisplayName,
-                        lease.Token,
-                        lease.ReportProgress);
+                    result = torrent.IsMultiFile
+                        ? await BuildMultiFileAsync(torrent, source, lease)
+                        : await BuildSingleFileAsync(torrent, source, lease);
                 }
                 catch (OperationCanceledException) when (lease.Lost && !cancellationToken.IsCancellationRequested)
                 {
@@ -168,6 +161,49 @@ public sealed class IndexingWorker(
             logger.LogError(ex, "Indexing failed unexpectedly for torrent {TorrentId}", torrentId);
             await UpdateLeasedWithRetryAsync(queue => queue.FailAsync(torrentId, leaseOwner, ex.Message, cancellationToken), cancellationToken);
         }
+    }
+
+    async Task<TorrentBuildResult> BuildSingleFileAsync(TorrentRecord torrent, IContentSource source, IndexingLease lease)
+    {
+        var metadata = await source.GetMetadataAsync(torrent.SourcePath, lease.Token);
+        if (metadata.Length != torrent.ContentLength || metadata.Version != torrent.ContentVersion)
+            throw new ContentSourceException("Content metadata changed since the indexing request was accepted.");
+
+        return await torrentBuilder.BuildSingleFileAsync(
+            metadata,
+            source,
+            torrent.DisplayName,
+            lease.Token,
+            lease.ReportProgress);
+    }
+
+    async Task<TorrentBuildResult> BuildMultiFileAsync(TorrentRecord torrent, IContentSource source, IndexingLease lease)
+    {
+        List<TorrentFileRecord> files;
+        await using (var scope = scopeFactory.CreateAsyncScope())
+        {
+            files = await scope.ServiceProvider.GetRequiredService<IcecoldDbContext>().TorrentFiles.AsNoTracking()
+                .Where(f => f.TorrentId == torrent.Id)
+                .OrderBy(f => f.Index)
+                .ToListAsync(lease.Token);
+        }
+
+        var entries = new List<MultiFileTorrentEntry>(files.Count);
+        foreach (var file in files)
+        {
+            var metadata = await source.GetMetadataAsync(file.SourcePath, lease.Token);
+            if (metadata.Length != file.ContentLength || metadata.Version != file.ContentVersion)
+                throw new ContentSourceException($"Content metadata of '{file.SourcePath}' changed since the indexing request was accepted.");
+
+            entries.Add(new MultiFileTorrentEntry(metadata, file.TorrentPath));
+        }
+
+        return await torrentBuilder.BuildMultiFileAsync(
+            torrent.DisplayName,
+            entries,
+            source,
+            lease.Token,
+            lease.ReportProgress);
     }
 
     async Task<bool> FinalizeAsync(Guid torrentId, string leaseOwner, TorrentBuildResult result, CancellationToken cancellationToken)
@@ -217,14 +253,18 @@ public sealed class IndexingWorker(
                     torrent.TorrentBytes = result.TorrentBytes;
                     torrent.DuplicateOfId = null;
                     torrent.Status = TorrentStatus.Ready;
-                    await UpsertIndexedLocationAsync(db, torrent, torrent.Id, makePrimary: true, completedAt, cancellationToken);
+                    if (!torrent.IsMultiFile)
+                        await UpsertIndexedLocationAsync(db, torrent, torrent.Id, makePrimary: true, completedAt, cancellationToken);
                 }
                 else
                 {
                     torrent.TorrentBytes = null;
                     torrent.DuplicateOfId = canonical.Id;
                     torrent.Status = TorrentStatus.Duplicate;
-                    await UpsertIndexedLocationAsync(db, torrent, canonical.Id, makePrimary: false, completedAt, cancellationToken);
+
+                    // Multi-file torrents have no locations; the canonical record serves its own files.
+                    if (!torrent.IsMultiFile)
+                        await UpsertIndexedLocationAsync(db, torrent, canonical.Id, makePrimary: false, completedAt, cancellationToken);
                 }
 
                 await db.SaveChangesAsync(cancellationToken);
