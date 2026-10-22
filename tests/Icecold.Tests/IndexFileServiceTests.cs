@@ -19,34 +19,41 @@ public sealed class IndexFileServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task Accepted_File_Enqueue_Does_Not_Use_Request_Cancellation_Token()
+    public async Task Accepted_File_Is_Enqueued()
     {
         await File.WriteAllTextAsync(Path.Combine(root, "sample.txt"), "hello");
-        var dbOptions = new DbContextOptionsBuilder<IcecoldDbContext>()
-            .UseInMemoryDatabase(Guid.NewGuid().ToString("n"))
-            .Options;
-        await using var db = new IcecoldDbContext(dbOptions);
+        await using var db = CreateDb();
         var queue = new RecordingIndexingQueue();
         var service = new IndexFileService(CreateRegistry(), db, queue);
-        using var requestCancellation = new CancellationTokenSource();
 
         var result = await service.SubmitFileAsync(
             new IndexFileCommand("local", "sample.txt", null),
-            requestCancellation.Token);
+            CancellationToken.None);
 
         Assert.Equal(IndexFileSubmissionStatus.Accepted, result.Status);
         Assert.Equal(result.Torrent!.Id, queue.EnqueuedIds.Single());
-        Assert.False(queue.LastCancellationToken.CanBeCanceled);
+    }
+
+    [Fact]
+    public async Task Full_Queue_Still_Accepts_And_Leaves_Row_Pending()
+    {
+        await File.WriteAllTextAsync(Path.Combine(root, "sample.txt"), "hello");
+        await using var db = CreateDb();
+        var service = new IndexFileService(CreateRegistry(), db, new RecordingIndexingQueue { Full = true });
+
+        var result = await service.SubmitFileAsync(
+            new IndexFileCommand("local", "sample.txt", null),
+            CancellationToken.None);
+
+        Assert.Equal(IndexFileSubmissionStatus.Accepted, result.Status);
+        Assert.Equal(TorrentStatus.Pending, (await db.Torrents.SingleAsync()).Status);
     }
 
     [Fact]
     public async Task Blank_Display_Name_Falls_Back_To_Metadata_Display_Name()
     {
         await File.WriteAllTextAsync(Path.Combine(root, "sample.txt"), "hello");
-        var dbOptions = new DbContextOptionsBuilder<IcecoldDbContext>()
-            .UseInMemoryDatabase(Guid.NewGuid().ToString("n"))
-            .Options;
-        await using var db = new IcecoldDbContext(dbOptions);
+        await using var db = CreateDb();
         var service = new IndexFileService(CreateRegistry(), db, new RecordingIndexingQueue());
 
         var result = await service.SubmitFileAsync(
@@ -57,6 +64,73 @@ public sealed class IndexFileServiceTests : IDisposable
         Assert.Equal("sample.txt", result.Torrent!.DisplayName);
         Assert.Equal("sample.txt", (await db.Torrents.SingleAsync()).DisplayName);
     }
+
+    [Fact]
+    public async Task Too_Long_Display_Name_Is_Bad_Request()
+    {
+        await File.WriteAllTextAsync(Path.Combine(root, "sample.txt"), "hello");
+        await using var db = CreateDb();
+        var service = new IndexFileService(CreateRegistry(), db, new RecordingIndexingQueue());
+
+        var result = await service.SubmitFileAsync(
+            new IndexFileCommand("local", "sample.txt", new string('n', 513)),
+            CancellationToken.None);
+
+        Assert.Equal(IndexFileSubmissionStatus.BadRequest, result.Status);
+        Assert.Empty(db.Torrents);
+    }
+
+    [Fact]
+    public async Task Too_Long_Path_Is_Bad_Request()
+    {
+        await using var db = CreateDb();
+        var service = new IndexFileService(CreateRegistry(), db, new RecordingIndexingQueue());
+
+        var result = await service.SubmitFileAsync(
+            new IndexFileCommand("local", new string('p', 4097), null),
+            CancellationToken.None);
+
+        Assert.Equal(IndexFileSubmissionStatus.BadRequest, result.Status);
+    }
+
+    [Fact]
+    public async Task Zero_Length_File_Is_Bad_Request()
+    {
+        await File.WriteAllBytesAsync(Path.Combine(root, "empty.bin"), []);
+        await using var db = CreateDb();
+        var service = new IndexFileService(CreateRegistry(), db, new RecordingIndexingQueue());
+
+        var result = await service.SubmitFileAsync(
+            new IndexFileCommand("local", "empty.bin", null),
+            CancellationToken.None);
+
+        Assert.Equal(IndexFileSubmissionStatus.BadRequest, result.Status);
+        Assert.Empty(db.Torrents);
+    }
+
+    [Fact]
+    public async Task Resubmitting_Failed_Record_Resets_Attempts()
+    {
+        await File.WriteAllTextAsync(Path.Combine(root, "sample.txt"), "hello");
+        await using var db = CreateDb();
+        var service = new IndexFileService(CreateRegistry(), db, new RecordingIndexingQueue());
+        var first = await service.SubmitFileAsync(new IndexFileCommand("local", "sample.txt", null), CancellationToken.None);
+        var stored = await db.Torrents.SingleAsync(t => t.Id == first.Torrent!.Id);
+        stored.Status = TorrentStatus.Failed;
+        stored.Attempts = 5;
+        await db.SaveChangesAsync();
+
+        var second = await service.SubmitFileAsync(new IndexFileCommand("local", "sample.txt", null), CancellationToken.None);
+
+        Assert.Equal(IndexFileSubmissionStatus.Accepted, second.Status);
+        Assert.Equal(TorrentStatus.Pending, stored.Status);
+        Assert.Equal(0, stored.Attempts);
+    }
+
+    static IcecoldDbContext CreateDb()
+        => new(new DbContextOptionsBuilder<IcecoldDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString("n"))
+            .Options);
 
     ContentSourceRegistry CreateRegistry()
         => new(
@@ -84,13 +158,15 @@ public sealed class IndexFileServiceTests : IDisposable
     {
         public List<Guid> EnqueuedIds { get; } = [];
 
-        public CancellationToken LastCancellationToken { get; private set; }
+        public bool Full { get; init; }
 
-        public ValueTask EnqueueAsync(Guid torrentId, CancellationToken cancellationToken)
+        public bool TryEnqueue(Guid torrentId)
         {
+            if (Full)
+                return false;
+
             EnqueuedIds.Add(torrentId);
-            LastCancellationToken = cancellationToken;
-            return ValueTask.CompletedTask;
+            return true;
         }
 
         public IAsyncEnumerable<Guid> DequeueAllAsync(CancellationToken cancellationToken)

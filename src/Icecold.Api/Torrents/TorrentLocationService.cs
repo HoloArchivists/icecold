@@ -129,7 +129,9 @@ public sealed class TorrentLocationService(
         if (request.MakePrimary || !torrent.Locations.Any(l => l.Id != location.Id && l.Status == TorrentLocationStatus.Active && l.IsPrimary))
             MakePrimary(torrent.Locations, location, now);
 
-        await db.SaveChangesAsync(cancellationToken);
+        if (!await TrySaveAsync(db, cancellationToken))
+            return ConcurrentChangeConflict();
+
         return Success(location);
     }
 
@@ -155,12 +157,15 @@ public sealed class TorrentLocationService(
         var verificationError = await VerifyLocationMetadataAsync(location, now, cancellationToken);
         if (verificationError is not null)
         {
-            await db.SaveChangesAsync(cancellationToken);
-            return Conflict(verificationError);
+            return await TrySaveAsync(db, cancellationToken)
+                ? Conflict(verificationError)
+                : ConcurrentChangeConflict();
         }
 
         MakePrimary(torrent.Locations, location, now);
-        await db.SaveChangesAsync(cancellationToken);
+        if (!await TrySaveAsync(db, cancellationToken))
+            return ConcurrentChangeConflict();
+
         return Success(location);
     }
 
@@ -194,7 +199,9 @@ public sealed class TorrentLocationService(
         if (replacement is not null && !torrent.Locations.Any(l => l.Id != location.Id && l.IsPrimary && l.Status == TorrentLocationStatus.Active))
             MakePrimary(torrent.Locations, replacement, now);
 
-        await db.SaveChangesAsync(cancellationToken);
+        if (!await TrySaveAsync(db, cancellationToken))
+            return ConcurrentChangeConflict();
+
         return Success(location);
     }
 
@@ -406,6 +413,24 @@ public sealed class TorrentLocationService(
         return await query.FirstOrDefaultAsync(t => t.Id == canonicalId, cancellationToken);
     }
 
+    // Concurrent admin edits of the same torrent can race on IX_torrent_locations_Primary or the
+    // location content-identity index; surface that as 409 so the caller can retry.
+    static async Task<bool> TrySaveAsync(IcecoldDbContext db, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+            return true;
+        }
+        catch (Exception ex) when (DatabaseRetry.IsSerializationOrUniqueConflict(ex))
+        {
+            db.ChangeTracker.Clear();
+            return false;
+        }
+    }
+
+    // IcecoldDbContext.SaveChangesAsync writes the demotions before the promotion, so flipping
+    // the flags on tracked entities here is safe against the filtered unique primary index.
     static void MakePrimary(IEnumerable<TorrentLocationRecord> locations, TorrentLocationRecord primary, DateTimeOffset now)
     {
         foreach (var location in locations)
@@ -478,4 +503,7 @@ public sealed class TorrentLocationService(
 
     static TorrentLocationOperationResult Conflict(string error)
         => new(TorrentLocationOperationStatus.Conflict, null, error);
+
+    static TorrentLocationOperationResult ConcurrentChangeConflict()
+        => Conflict("The torrent's locations were changed concurrently; retry the request.");
 }

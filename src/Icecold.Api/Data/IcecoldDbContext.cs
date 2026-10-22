@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
 
 namespace Icecold.Api.Data;
 
@@ -65,5 +66,73 @@ public sealed class IcecoldDbContext(DbContextOptions<IcecoldDbContext> options)
             .WithMany(t => t.Locations)
             .HasForeignKey(l => l.TorrentId)
             .OnDelete(DeleteBehavior.Cascade);
+    }
+
+    // IX_torrent_locations_Primary allows one IsPrimary row per torrent and PostgreSQL checks it
+    // per statement. EF orders the UPDATEs of a single SaveChanges arbitrarily, so moving the
+    // primary flag can set the new primary before clearing the old one and fail with 23505.
+    // When a save both demotes and promotes primaries, write the demotions first and the
+    // promotions second, inside one transaction (reusing the caller's transaction if any).
+    public override async Task<int> SaveChangesAsync(
+        bool acceptAllChangesOnSuccess,
+        CancellationToken cancellationToken = default)
+    {
+        if (!acceptAllChangesOnSuccess)
+            return await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+
+        var promotions = PendingPrimaryPromotions();
+        if (promotions.Count == 0)
+            return await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+
+        if (!Database.IsRelational() || Database.CurrentTransaction is not null)
+            return await SavePrimaryPromotionsLastAsync(promotions, cancellationToken);
+
+        // No retrying execution strategy is configured; if one is added, this wrapper keeps
+        // the explicit transaction legal, but a retry would replay against already-accepted state.
+        return await Database.CreateExecutionStrategy().ExecuteAsync(
+            promotions,
+            async (_, state, ct) =>
+            {
+                await using var transaction = await Database.BeginTransactionAsync(ct);
+                var count = await SavePrimaryPromotionsLastAsync(state, ct);
+                await transaction.CommitAsync(ct);
+                return count;
+            },
+            verifySucceeded: null,
+            cancellationToken);
+    }
+
+    List<EntityEntry<TorrentLocationRecord>> PendingPrimaryPromotions()
+    {
+        ChangeTracker.DetectChanges();
+        var locations = ChangeTracker.Entries<TorrentLocationRecord>().ToList();
+        var hasDemotion = locations.Any(e =>
+            e.State == EntityState.Modified
+            && e.Property(l => l.IsPrimary).OriginalValue
+            && !e.Entity.IsPrimary);
+        if (!hasDemotion)
+            return [];
+
+        return locations
+            .Where(e => e.Entity.IsPrimary
+                && (e.State == EntityState.Added
+                    || (e.State == EntityState.Modified && !e.Property(l => l.IsPrimary).OriginalValue)))
+            .ToList();
+    }
+
+    async Task<int> SavePrimaryPromotionsLastAsync(
+        List<EntityEntry<TorrentLocationRecord>> promotions,
+        CancellationToken cancellationToken)
+    {
+        foreach (var entry in promotions)
+            entry.Entity.IsPrimary = false;
+
+        var count = await base.SaveChangesAsync(acceptAllChangesOnSuccess: true, cancellationToken);
+
+        foreach (var entry in promotions)
+            entry.Entity.IsPrimary = true;
+
+        await base.SaveChangesAsync(acceptAllChangesOnSuccess: true, cancellationToken);
+        return count;
     }
 }

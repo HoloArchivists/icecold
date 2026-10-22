@@ -41,7 +41,11 @@ public sealed class IndexingClaimService(IcecoldDbContext db)
         return torrent;
     }
 
-    public async Task<IReadOnlyList<Guid>> ResetInterruptedAndListPendingAsync(CancellationToken cancellationToken)
+    // Single-instance assumption: this runs at startup and returns every Hashing row to Pending,
+    // because a Hashing row can only belong to a worker of a previous (dead) process. There are
+    // no claim leases or owner ids, so running more than one Icecold instance against the same
+    // database would let a restarting instance steal jobs another live instance is hashing.
+    public async Task ResetInterruptedAsync(CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
         if (db.Database.IsRelational())
@@ -53,11 +57,7 @@ public sealed class IndexingClaimService(IcecoldDbContext db)
                         .SetProperty(t => t.Status, TorrentStatus.Pending)
                         .SetProperty(t => t.UpdatedAt, now),
                     cancellationToken);
-
-            return await db.Torrents.AsNoTracking()
-                .Where(t => t.Status == TorrentStatus.Pending)
-                .Select(t => t.Id)
-                .ToListAsync(cancellationToken);
+            return;
         }
 
         var interrupted = await db.Torrents
@@ -72,10 +72,14 @@ public sealed class IndexingClaimService(IcecoldDbContext db)
 
         if (interrupted.Count > 0)
             await db.SaveChangesAsync(cancellationToken);
-
-        return await db.Torrents.AsNoTracking()
-            .Where(t => t.Status == TorrentStatus.Pending)
-            .Select(t => t.Id)
-            .ToListAsync(cancellationToken);
     }
+
+    public async Task<IReadOnlyList<Guid>> ListPendingAsync(int limit, CancellationToken cancellationToken)
+        => await db.Torrents.AsNoTracking()
+            .Where(t => t.Status == TorrentStatus.Pending)
+            .OrderBy(t => t.UpdatedAt)
+            .ThenBy(t => t.Id)
+            .Select(t => t.Id)
+            .Take(limit)
+            .ToListAsync(cancellationToken);
 }

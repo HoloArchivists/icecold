@@ -10,11 +10,16 @@ public sealed class IndexFileService(
     IIndexingQueue queue)
 {
     const int MaxSubmitAttempts = 8;
+    const int MaxDisplayNameLength = 512;
+    const int MaxSourcePathLength = 4096;
 
     public async Task<IndexFileSubmission> SubmitFileAsync(IndexFileCommand command, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(command.Source) || string.IsNullOrWhiteSpace(command.Path))
             return IndexFileSubmission.BadRequest("source and path are required");
+
+        if (command.Path.Length > MaxSourcePathLength)
+            return IndexFileSubmission.BadRequest($"path must be at most {MaxSourcePathLength} characters");
 
         IContentSource source;
         try
@@ -40,6 +45,16 @@ public sealed class IndexFileService(
             return IndexFileSubmission.BadRequest(ex.Message);
         }
 
+        if (metadata.Length == 0)
+            return IndexFileSubmission.BadRequest("zero-length files cannot be indexed");
+
+        if (metadata.Path.Length > MaxSourcePathLength)
+            return IndexFileSubmission.BadRequest($"path must be at most {MaxSourcePathLength} characters");
+
+        var displayName = NormalizeDisplayName(command.DisplayName, metadata.DisplayName);
+        if (displayName.Length > MaxDisplayNameLength)
+            return IndexFileSubmission.BadRequest($"displayName must be at most {MaxDisplayNameLength} characters");
+
         for (var attempt = 0; attempt < MaxSubmitAttempts; attempt++)
         {
             var now = DateTimeOffset.UtcNow;
@@ -54,7 +69,8 @@ public sealed class IndexFileService(
                         ResetFailedRecord(existing, now);
                         await db.SaveChangesAsync(cancellationToken);
 
-                        await queue.EnqueueAsync(existing.Id, CancellationToken.None);
+                        // A full queue is fine: the row is persisted as Pending and the worker's sweep picks it up.
+                        queue.TryEnqueue(existing.Id);
                         return IndexFileSubmission.Accepted(existing);
                     }
 
@@ -68,7 +84,7 @@ public sealed class IndexFileService(
                     Id = Guid.NewGuid(),
                     SourceName = metadata.SourceName,
                     SourcePath = metadata.Path,
-                    DisplayName = NormalizeDisplayName(command.DisplayName, metadata.DisplayName),
+                    DisplayName = displayName,
                     ContentLength = metadata.Length,
                     ContentVersion = metadata.Version,
                     ContentLastModified = metadata.LastModified,
@@ -80,7 +96,7 @@ public sealed class IndexFileService(
                 db.Torrents.Add(torrent);
                 await db.SaveChangesAsync(cancellationToken);
 
-                await queue.EnqueueAsync(torrent.Id, CancellationToken.None);
+                queue.TryEnqueue(torrent.Id);
                 return IndexFileSubmission.Accepted(torrent);
             }
             catch (Exception ex) when (DatabaseRetry.IsSerializationOrUniqueConflict(ex))
@@ -123,6 +139,7 @@ public sealed class IndexFileService(
     {
         torrent.Status = TorrentStatus.Pending;
         torrent.Error = null;
+        torrent.Attempts = 0;
         torrent.InfoHashHex = null;
         torrent.MseObfuscatedHashHex = null;
         torrent.DuplicateOfId = null;

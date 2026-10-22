@@ -14,9 +14,13 @@ public sealed class TorrentBuilder(PublicUrlBuilder urls)
         string? displayName,
         CancellationToken cancellationToken)
     {
+        // A zero-length file would produce an empty `pieces` string, which clients reject.
+        if (metadata.Length <= 0)
+            throw new ContentSourceException($"Zero-length file '{metadata.Path}' cannot be indexed.");
+
         var torrentName = string.IsNullOrWhiteSpace(displayName) ? metadata.DisplayName : displayName;
         var pieceLength = SelectPieceLength(metadata.Length);
-        var pieces = await HashPiecesAsync(source, metadata.Path, metadata.Length, pieceLength, cancellationToken);
+        var pieces = await HashPiecesAsync(source, metadata, pieceLength, cancellationToken);
         var pieceCount = pieces.Length / SHA1.HashSizeInBytes;
 
         var info = new Dictionary<string, object>(StringComparer.Ordinal)
@@ -71,11 +75,12 @@ public sealed class TorrentBuilder(PublicUrlBuilder urls)
 
     static async Task<byte[]> HashPiecesAsync(
         IContentSource source,
-        string path,
-        long expectedLength,
+        ContentMetadata metadata,
         int pieceLength,
         CancellationToken cancellationToken)
     {
+        var path = metadata.Path;
+        var expectedLength = metadata.Length;
         await using var content = await source.OpenReadAsync(path, cancellationToken);
         using var hashes = new MemoryStream();
         var buffer = ArrayPool<byte>.Shared.Rent(pieceLength);
@@ -105,6 +110,12 @@ public sealed class TorrentBuilder(PublicUrlBuilder urls)
 
             if (totalRead != expectedLength)
                 throw new ContentSourceException($"Content length changed while hashing '{path}'. Expected {expectedLength} bytes, read {totalRead} bytes.");
+
+            // Same-length rewrites are only visible through the modification time. Re-stat the
+            // handle that was hashed so the hashes are known to match metadata.Version.
+            var versionAfterHashing = source.GetOpenStreamVersion(content);
+            if (versionAfterHashing is not null && versionAfterHashing != metadata.Version)
+                throw new ContentSourceException($"Content changed while hashing '{path}'.");
 
             return hashes.ToArray();
         }

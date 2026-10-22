@@ -31,7 +31,7 @@ public sealed class IndexingClaimServiceTests
     }
 
     [Fact]
-    public async Task ResetInterruptedAndListPendingAsync_Requeues_Hashing_As_Pending()
+    public async Task ResetInterrupted_Then_ListPending_Requeues_Hashing_As_Pending()
     {
         await using var db = CreateDb();
         var pending = AddTorrent(db, TorrentStatus.Pending);
@@ -40,11 +40,25 @@ public sealed class IndexingClaimServiceTests
         await db.SaveChangesAsync();
         var service = new IndexingClaimService(db);
 
-        var ids = await service.ResetInterruptedAndListPendingAsync(CancellationToken.None);
+        await service.ResetInterruptedAsync(CancellationToken.None);
+        var ids = await service.ListPendingAsync(100, CancellationToken.None);
 
         Assert.Contains(pending.Id, ids);
         Assert.Contains(hashing.Id, ids);
         Assert.Equal(TorrentStatus.Pending, (await db.Torrents.FindAsync(hashing.Id))!.Status);
+    }
+
+    [Fact]
+    public async Task ListPendingAsync_Respects_Limit()
+    {
+        await using var db = CreateDb();
+        for (var i = 0; i < 5; i++)
+            AddTorrent(db, TorrentStatus.Pending);
+        await db.SaveChangesAsync();
+
+        var ids = await new IndexingClaimService(db).ListPendingAsync(2, CancellationToken.None);
+
+        Assert.Equal(2, ids.Count);
     }
 
     static IcecoldDbContext CreateDb()

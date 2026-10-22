@@ -322,6 +322,46 @@ public sealed class TorrentBuilderTests : IDisposable
         return db;
     }
 
+    [Fact]
+    public async Task BuildSingleFileAsync_Rejects_Zero_Length_Files()
+    {
+        await File.WriteAllBytesAsync(Path.Combine(root, "empty.bin"), []);
+        var source = new LocalFileContentSource("local", root);
+        var metadata = await source.GetMetadataAsync("empty.bin", CancellationToken.None);
+
+        await Assert.ThrowsAsync<ContentSourceException>(
+            () => new TorrentBuilder(CreateUrls()).BuildSingleFileAsync(metadata, source, null, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task BuildSingleFileAsync_Rejects_Same_Length_Change_Detected_On_Open_Handle()
+    {
+        var path = Path.Combine(root, "payload.bin");
+        await File.WriteAllTextAsync(path, "original bytes");
+        var source = new LocalFileContentSource("local", root);
+        var metadata = await source.GetMetadataAsync("payload.bin", CancellationToken.None);
+
+        // Same length, new contents and modification time: only the version reveals the change.
+        await File.WriteAllTextAsync(path, "modified bytes");
+        File.SetLastWriteTimeUtc(path, metadata.LastModified!.Value.UtcDateTime.AddSeconds(5));
+
+        var ex = await Assert.ThrowsAsync<ContentSourceException>(
+            () => new TorrentBuilder(CreateUrls()).BuildSingleFileAsync(metadata, source, null, CancellationToken.None));
+        Assert.Contains("changed while hashing", ex.Message);
+    }
+
+    [Fact]
+    public async Task LocalFileContentSource_Open_Stream_Version_Matches_Metadata_Version()
+    {
+        await File.WriteAllTextAsync(Path.Combine(root, "payload.bin"), "payload bytes");
+        var source = new LocalFileContentSource("local", root);
+        var metadata = await source.GetMetadataAsync("payload.bin", CancellationToken.None);
+
+        await using var stream = await source.OpenReadAsync("payload.bin", CancellationToken.None);
+
+        Assert.Equal(metadata.Version, source.GetOpenStreamVersion(stream));
+    }
+
     static PublicUrlBuilder CreateUrls(
         bool webSeedEnabled = true,
         bool trackerEnabled = true,
