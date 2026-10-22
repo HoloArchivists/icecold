@@ -12,7 +12,8 @@ public sealed class TorrentBuilder(PublicUrlBuilder urls)
         ContentMetadata metadata,
         IContentSource source,
         string? displayName,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<long>? onProgress = null)
     {
         // A zero-length file would produce an empty `pieces` string, which clients reject.
         if (metadata.Length <= 0)
@@ -20,7 +21,7 @@ public sealed class TorrentBuilder(PublicUrlBuilder urls)
 
         var torrentName = string.IsNullOrWhiteSpace(displayName) ? metadata.DisplayName : displayName;
         var pieceLength = SelectPieceLength(metadata.Length);
-        var pieces = await HashPiecesAsync(source, metadata, pieceLength, cancellationToken);
+        var pieces = await HashPiecesAsync(source, metadata, pieceLength, onProgress, cancellationToken);
         var pieceCount = pieces.Length / SHA1.HashSizeInBytes;
 
         var info = new Dictionary<string, object>(StringComparer.Ordinal)
@@ -77,6 +78,7 @@ public sealed class TorrentBuilder(PublicUrlBuilder urls)
         IContentSource source,
         ContentMetadata metadata,
         int pieceLength,
+        Action<long>? onProgress,
         CancellationToken cancellationToken)
     {
         var path = metadata.Path;
@@ -106,6 +108,7 @@ public sealed class TorrentBuilder(PublicUrlBuilder urls)
 
                 var hash = SHA1.HashData(buffer.AsSpan(0, pieceBytes));
                 hashes.Write(hash);
+                onProgress?.Invoke(totalRead);
             }
 
             if (totalRead != expectedLength)

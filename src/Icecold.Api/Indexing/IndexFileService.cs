@@ -7,7 +7,7 @@ namespace Icecold.Api.Indexing;
 public sealed class IndexFileService(
     ContentSourceRegistry sources,
     IcecoldDbContext db,
-    IIndexingQueue queue)
+    IndexingSignal signal)
 {
     const int MaxSubmitAttempts = 8;
     const int MaxDisplayNameLength = 512;
@@ -66,17 +66,25 @@ public sealed class IndexFileService(
                 {
                     if (existing.Status == TorrentStatus.Failed)
                     {
-                        ResetFailedRecord(existing, now);
+                        ResetFailedRecord(existing, command.Priority, now);
                         await db.SaveChangesAsync(cancellationToken);
-
-                        // A full queue is fine: the row is persisted as Pending and the worker's sweep picks it up.
-                        queue.TryEnqueue(existing.Id);
+                        signal.Notify();
                         return IndexFileSubmission.Accepted(existing);
                     }
 
-                    return existing.Status is TorrentStatus.Ready or TorrentStatus.Duplicate
-                        ? IndexFileSubmission.Completed(existing)
-                        : IndexFileSubmission.Accepted(existing);
+                    if (existing.Status is TorrentStatus.Ready or TorrentStatus.Duplicate)
+                        return IndexFileSubmission.Completed(existing);
+
+                    // Resubmitting a queued job can only raise its priority, so repeated requests
+                    // from a caller that sees demand never demote a job someone else bumped.
+                    if (command.Priority > existing.Priority)
+                    {
+                        existing.Priority = command.Priority.Value;
+                        existing.UpdatedAt = now;
+                        await db.SaveChangesAsync(cancellationToken);
+                    }
+
+                    return IndexFileSubmission.Accepted(existing);
                 }
 
                 var torrent = new TorrentRecord
@@ -89,6 +97,8 @@ public sealed class IndexFileService(
                     ContentVersion = metadata.Version,
                     ContentLastModified = metadata.LastModified,
                     Status = TorrentStatus.Pending,
+                    Priority = command.Priority ?? 0,
+                    AvailableAt = now,
                     CreatedAt = now,
                     UpdatedAt = now
                 };
@@ -96,7 +106,7 @@ public sealed class IndexFileService(
                 db.Torrents.Add(torrent);
                 await db.SaveChangesAsync(cancellationToken);
 
-                queue.TryEnqueue(torrent.Id);
+                signal.Notify();
                 return IndexFileSubmission.Accepted(torrent);
             }
             catch (Exception ex) when (DatabaseRetry.IsSerializationOrUniqueConflict(ex))
@@ -135,9 +145,12 @@ public sealed class IndexFileService(
     static Task DelayForRetryAsync(int attempt, CancellationToken cancellationToken)
         => Task.Delay(TimeSpan.FromMilliseconds(Math.Min(250, 10 * (attempt + 1))), cancellationToken);
 
-    static void ResetFailedRecord(TorrentRecord torrent, DateTimeOffset now)
+    static void ResetFailedRecord(TorrentRecord torrent, int? priority, DateTimeOffset now)
     {
         torrent.Status = TorrentStatus.Pending;
+        torrent.Priority = priority ?? torrent.Priority;
+        torrent.AvailableAt = now;
+        IndexingQueue.ClearLease(torrent);
         torrent.Error = null;
         torrent.Attempts = 0;
         torrent.InfoHashHex = null;
@@ -151,7 +164,7 @@ public sealed class IndexFileService(
     }
 }
 
-public sealed record IndexFileCommand(string Source, string Path, string? DisplayName);
+public sealed record IndexFileCommand(string Source, string Path, string? DisplayName, int? Priority = null);
 
 public sealed record IndexFileSubmission(IndexFileSubmissionStatus Status, TorrentRecord? Torrent, string? Error)
 {

@@ -19,34 +19,42 @@ public sealed class IndexFileServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task Accepted_File_Is_Enqueued()
+    public async Task Accepted_File_Is_Queued_And_Wakes_A_Worker()
     {
         await File.WriteAllTextAsync(Path.Combine(root, "sample.txt"), "hello");
         await using var db = CreateDb();
-        var queue = new RecordingIndexingQueue();
-        var service = new IndexFileService(CreateRegistry(), db, queue);
+        var signal = new IndexingSignal();
+        var service = new IndexFileService(CreateRegistry(), db, signal);
 
         var result = await service.SubmitFileAsync(
-            new IndexFileCommand("local", "sample.txt", null),
+            new IndexFileCommand("local", "sample.txt", null, Priority: 7),
             CancellationToken.None);
 
         Assert.Equal(IndexFileSubmissionStatus.Accepted, result.Status);
-        Assert.Equal(result.Torrent!.Id, queue.EnqueuedIds.Single());
+        var stored = await db.Torrents.SingleAsync();
+        Assert.Equal(TorrentStatus.Pending, stored.Status);
+        Assert.Equal(7, stored.Priority);
+        Assert.NotEqual(default, stored.AvailableAt);
+        Assert.True(await signal.WaitAsync(TimeSpan.Zero, CancellationToken.None));
     }
 
     [Fact]
-    public async Task Full_Queue_Still_Accepts_And_Leaves_Row_Pending()
+    public async Task Resubmitting_A_Queued_File_Raises_But_Never_Lowers_Priority()
     {
         await File.WriteAllTextAsync(Path.Combine(root, "sample.txt"), "hello");
         await using var db = CreateDb();
-        var service = new IndexFileService(CreateRegistry(), db, new RecordingIndexingQueue { Full = true });
+        var service = new IndexFileService(CreateRegistry(), db, new IndexingSignal());
 
-        var result = await service.SubmitFileAsync(
-            new IndexFileCommand("local", "sample.txt", null),
-            CancellationToken.None);
+        await service.SubmitFileAsync(new IndexFileCommand("local", "sample.txt", null, Priority: 5), CancellationToken.None);
+        await service.SubmitFileAsync(new IndexFileCommand("local", "sample.txt", null, Priority: 2), CancellationToken.None);
+        Assert.Equal(5, (await db.Torrents.SingleAsync()).Priority);
 
-        Assert.Equal(IndexFileSubmissionStatus.Accepted, result.Status);
-        Assert.Equal(TorrentStatus.Pending, (await db.Torrents.SingleAsync()).Status);
+        await service.SubmitFileAsync(new IndexFileCommand("local", "sample.txt", null), CancellationToken.None);
+        Assert.Equal(5, (await db.Torrents.SingleAsync()).Priority);
+
+        var raised = await service.SubmitFileAsync(new IndexFileCommand("local", "sample.txt", null, Priority: 50), CancellationToken.None);
+        Assert.Equal(IndexFileSubmissionStatus.Accepted, raised.Status);
+        Assert.Equal(50, (await db.Torrents.SingleAsync()).Priority);
     }
 
     [Fact]
@@ -54,7 +62,7 @@ public sealed class IndexFileServiceTests : IDisposable
     {
         await File.WriteAllTextAsync(Path.Combine(root, "sample.txt"), "hello");
         await using var db = CreateDb();
-        var service = new IndexFileService(CreateRegistry(), db, new RecordingIndexingQueue());
+        var service = new IndexFileService(CreateRegistry(), db, new IndexingSignal());
 
         var result = await service.SubmitFileAsync(
             new IndexFileCommand("local", "sample.txt", "   "),
@@ -70,7 +78,7 @@ public sealed class IndexFileServiceTests : IDisposable
     {
         await File.WriteAllTextAsync(Path.Combine(root, "sample.txt"), "hello");
         await using var db = CreateDb();
-        var service = new IndexFileService(CreateRegistry(), db, new RecordingIndexingQueue());
+        var service = new IndexFileService(CreateRegistry(), db, new IndexingSignal());
 
         var result = await service.SubmitFileAsync(
             new IndexFileCommand("local", "sample.txt", new string('n', 513)),
@@ -84,7 +92,7 @@ public sealed class IndexFileServiceTests : IDisposable
     public async Task Too_Long_Path_Is_Bad_Request()
     {
         await using var db = CreateDb();
-        var service = new IndexFileService(CreateRegistry(), db, new RecordingIndexingQueue());
+        var service = new IndexFileService(CreateRegistry(), db, new IndexingSignal());
 
         var result = await service.SubmitFileAsync(
             new IndexFileCommand("local", new string('p', 4097), null),
@@ -98,7 +106,7 @@ public sealed class IndexFileServiceTests : IDisposable
     {
         await File.WriteAllBytesAsync(Path.Combine(root, "empty.bin"), []);
         await using var db = CreateDb();
-        var service = new IndexFileService(CreateRegistry(), db, new RecordingIndexingQueue());
+        var service = new IndexFileService(CreateRegistry(), db, new IndexingSignal());
 
         var result = await service.SubmitFileAsync(
             new IndexFileCommand("local", "empty.bin", null),
@@ -113,7 +121,7 @@ public sealed class IndexFileServiceTests : IDisposable
     {
         await File.WriteAllTextAsync(Path.Combine(root, "sample.txt"), "hello");
         await using var db = CreateDb();
-        var service = new IndexFileService(CreateRegistry(), db, new RecordingIndexingQueue());
+        var service = new IndexFileService(CreateRegistry(), db, new IndexingSignal());
         var first = await service.SubmitFileAsync(new IndexFileCommand("local", "sample.txt", null), CancellationToken.None);
         var stored = await db.Torrents.SingleAsync(t => t.Id == first.Torrent!.Id);
         stored.Status = TorrentStatus.Failed;
@@ -152,25 +160,6 @@ public sealed class IndexFileServiceTests : IDisposable
     {
         if (Directory.Exists(root))
             Directory.Delete(root, recursive: true);
-    }
-
-    sealed class RecordingIndexingQueue : IIndexingQueue
-    {
-        public List<Guid> EnqueuedIds { get; } = [];
-
-        public bool Full { get; init; }
-
-        public bool TryEnqueue(Guid torrentId)
-        {
-            if (Full)
-                return false;
-
-            EnqueuedIds.Add(torrentId);
-            return true;
-        }
-
-        public IAsyncEnumerable<Guid> DequeueAllAsync(CancellationToken cancellationToken)
-            => throw new NotSupportedException();
     }
 
     sealed class TestWebHostEnvironment(string contentRootPath) : IWebHostEnvironment

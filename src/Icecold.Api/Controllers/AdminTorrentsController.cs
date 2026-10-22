@@ -1,6 +1,7 @@
 using Icecold.Api.Admin;
 using Icecold.Api.Api;
 using Icecold.Api.Data;
+using Icecold.Api.Indexing;
 using Icecold.Api.Torrents;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -10,7 +11,10 @@ namespace Icecold.Api.Controllers;
 [ApiController]
 [AdminApiKey]
 [Route("api/torrents")]
-public sealed class AdminTorrentsController(IcecoldDbContext db, TorrentLocationService locations) : ControllerBase
+public sealed class AdminTorrentsController(
+    IcecoldDbContext db,
+    IndexingQueue queue,
+    TorrentLocationService locations) : ControllerBase
 {
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> GetById(Guid id, CancellationToken cancellationToken)
@@ -19,7 +23,29 @@ public sealed class AdminTorrentsController(IcecoldDbContext db, TorrentLocation
             .Include(t => t.Locations)
             .FirstOrDefaultAsync(t => t.Id == id, cancellationToken);
 
-        return torrent is null ? NotFound() : Ok(IndexResponse.From(torrent));
+        return torrent is null
+            ? NotFound()
+            : Ok(IndexResponse.From(torrent, await queue.GetQueuePositionAsync(torrent, cancellationToken)));
+    }
+
+    // Sets the priority of a queued job exactly (it may also lower it). Higher runs first.
+    [HttpPut("{id:guid}/priority")]
+    public async Task<IActionResult> SetPriority(Guid id, SetPriorityRequest request, CancellationToken cancellationToken)
+    {
+        var torrent = await db.Torrents
+            .Include(t => t.Locations)
+            .FirstOrDefaultAsync(t => t.Id == id, cancellationToken);
+        if (torrent is null)
+            return NotFound();
+
+        if (torrent.Status is not (TorrentStatus.Pending or TorrentStatus.Hashing))
+            return Problem($"Torrent is {torrent.Status}, not queued.", statusCode: StatusCodes.Status409Conflict);
+
+        // EF writes only the changed column, so this does not race the worker's lease updates.
+        torrent.Priority = request.Priority;
+        await db.SaveChangesAsync(cancellationToken);
+
+        return Ok(IndexResponse.From(torrent, await queue.GetQueuePositionAsync(torrent, cancellationToken)));
     }
 
     [HttpGet("{id:guid}/locations")]

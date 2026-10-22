@@ -3,7 +3,7 @@ using Microsoft.Extensions.Options;
 
 namespace Icecold.Api.Content;
 
-public sealed class ContentSourceRegistry
+public sealed class ContentSourceRegistry : IDisposable
 {
     readonly IReadOnlyDictionary<string, IContentSource> sources;
 
@@ -30,6 +30,7 @@ public sealed class ContentSourceRegistry
             built[source.Name] = source.Type.ToLowerInvariant() switch
             {
                 "local" => new LocalFileContentSource(source.Name, ResolveConfiguredRootPath(source, environment.ContentRootPath)),
+                "http" => new HttpContentSource(source),
                 _ => throw new InvalidOperationException($"Unsupported content source type '{source.Type}' for '{source.Name}'.")
             };
         }
@@ -39,6 +40,12 @@ public sealed class ContentSourceRegistry
 
     public IContentSource GetRequired(string name)
         => sources.TryGetValue(name, out var source) ? source : throw new ContentSourceNotFoundException(name);
+
+    public void Dispose()
+    {
+        foreach (var source in sources.Values.OfType<IDisposable>())
+            source.Dispose();
+    }
 
     static string ResolveConfiguredRootPath(ContentSourceOptions source, string contentRootPath)
     {

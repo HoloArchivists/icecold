@@ -109,6 +109,55 @@ public sealed class IndexFileEndpointTests : IDisposable
         Assert.Contains(canonical.Locations, l => l.SourcePath == "second.bin" && !l.IsPrimary);
     }
 
+    [Fact]
+    public async Task Status_Reports_Queue_Position_And_Priority_Can_Be_Set()
+    {
+        await File.WriteAllTextAsync(Path.Combine(root, "a.txt"), "first");
+        await File.WriteAllTextAsync(Path.Combine(root, "b.txt"), "second");
+        await using var factory = CreateFactory();
+        using var client = factory.CreateClient();
+
+        var first = await ReadIdAsync(await PostIndexAsync(client, "a.txt"));
+        using var secondResponse = await PostIndexAsync(client, "b.txt");
+        var second = await ReadJsonAsync(secondResponse);
+        Assert.Equal(1, second.GetProperty("queuePosition").GetInt32());
+        Assert.Equal(0, second.GetProperty("priority").GetInt32());
+        Assert.Equal(JsonValueKind.Null, second.GetProperty("hashedBytes").ValueKind);
+
+        using var bump = new HttpRequestMessage(HttpMethod.Put, $"/api/torrents/{second.GetProperty("id").GetString()}/priority")
+        {
+            Content = JsonContent.Create(new { priority = 10 })
+        };
+        bump.Headers.Add("X-Icecold-Admin-Key", "dev-admin-key");
+        using var bumped = await client.SendAsync(bump, CancellationToken.None);
+        var bumpedJson = await ReadJsonAsync(bumped);
+        Assert.Equal(HttpStatusCode.OK, bumped.StatusCode);
+        Assert.Equal(10, bumpedJson.GetProperty("priority").GetInt32());
+        Assert.Equal(0, bumpedJson.GetProperty("queuePosition").GetInt32());
+
+        var firstStatus = await GetStatusAsync(client, first);
+        Assert.Equal(1, firstStatus.GetProperty("queuePosition").GetInt32());
+    }
+
+    [Fact]
+    public async Task Setting_Priority_Of_A_Finished_Torrent_Conflicts()
+    {
+        await File.WriteAllTextAsync(Path.Combine(root, "sample.txt"), "hello");
+        await using var factory = CreateFactory(removeHostedServices: false);
+        using var client = factory.CreateClient();
+        var id = await ReadIdAsync(await PostIndexAsync(client, "sample.txt"));
+        await PollStatusAsync(client, id, "Ready");
+
+        using var request = new HttpRequestMessage(HttpMethod.Put, $"/api/torrents/{id}/priority")
+        {
+            Content = JsonContent.Create(new { priority = 10 })
+        };
+        request.Headers.Add("X-Icecold-Admin-Key", "dev-admin-key");
+        using var response = await client.SendAsync(request, CancellationToken.None);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+    }
+
     WebApplicationFactory<Program> CreateFactory(bool removeHostedServices = true)
         => new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
@@ -159,6 +208,22 @@ public sealed class IndexFileEndpointTests : IDisposable
         await using var stream = await response.Content.ReadAsStreamAsync(CancellationToken.None);
         using var document = await JsonDocument.ParseAsync(stream, cancellationToken: CancellationToken.None);
         return document.RootElement.GetProperty("id").GetString()!;
+    }
+
+    static async Task<JsonElement> ReadJsonAsync(HttpResponseMessage response)
+    {
+        await using var stream = await response.Content.ReadAsStreamAsync(CancellationToken.None);
+        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: CancellationToken.None);
+        return document.RootElement.Clone();
+    }
+
+    static async Task<JsonElement> GetStatusAsync(HttpClient client, string id)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/api/torrents/{id}");
+        request.Headers.Add("X-Icecold-Admin-Key", "dev-admin-key");
+        using var response = await client.SendAsync(request, CancellationToken.None);
+        response.EnsureSuccessStatusCode();
+        return await ReadJsonAsync(response);
     }
 
     static async Task<JsonElement> PollStatusAsync(HttpClient client, string id, string expectedStatus)

@@ -13,12 +13,14 @@ public sealed class IndexingOptionsTests
             Indexing = new IndexingOptions
             {
                 MaxConcurrency = 0,
-                QueueCapacity = 0
+                PollIntervalSeconds = 0,
+                LeaseDurationSeconds = 5
             }
         });
 
         Assert.True(result.Failed);
         Assert.Contains("Icecold:Indexing:MaxConcurrency must be at least 1.", result.Failures);
-        Assert.Contains("Icecold:Indexing:QueueCapacity must be at least 1.", result.Failures);
+        Assert.Contains("Icecold:Indexing:PollIntervalSeconds must be at least 1.", result.Failures);
+        Assert.Contains("Icecold:Indexing:LeaseDurationSeconds must be at least 10.", result.Failures);
     }
 }

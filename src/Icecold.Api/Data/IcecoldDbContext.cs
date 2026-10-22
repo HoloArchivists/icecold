@@ -23,6 +23,7 @@ public sealed class IcecoldDbContext(DbContextOptions<IcecoldDbContext> options)
         torrent.Property(t => t.MseObfuscatedHashHex).HasMaxLength(40);
         torrent.Property(t => t.TorrentBytes);
         torrent.Property(t => t.Error).HasMaxLength(4096);
+        torrent.Property(t => t.LeaseOwner).HasMaxLength(128);
         torrent.HasIndex(t => t.InfoHashHex)
             .IsUnique()
             .HasFilter("\"InfoHashHex\" IS NOT NULL AND \"Status\" = 'Ready'");
@@ -36,6 +37,13 @@ public sealed class IcecoldDbContext(DbContextOptions<IcecoldDbContext> options)
         torrent.HasIndex(t => t.DuplicateOfId);
         torrent.HasIndex(t => t.Status);
         torrent.HasIndex(t => new { t.SourceName, t.SourcePath });
+        torrent.HasIndex(t => new { t.Priority, t.AvailableAt, t.Id })
+            .IsDescending(true, false, false)
+            .HasDatabaseName("IX_torrents_PendingQueue")
+            .HasFilter("\"Status\" = 'Pending'");
+        torrent.HasIndex(t => t.LeaseExpiresAt)
+            .HasDatabaseName("IX_torrents_HashingLeases")
+            .HasFilter("\"Status\" = 'Hashing'");
         torrent.HasOne<TorrentRecord>()
             .WithMany()
             .HasForeignKey(t => t.DuplicateOfId)
