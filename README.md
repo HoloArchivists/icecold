@@ -71,14 +71,29 @@ ICECOLD_PUBLIC_BASE_URL=https://icecold.example.org
 ICECOLD_CONTENT_ROOT=/srv/archive/files
 
 # Optional Docker/runtime settings
+ICECOLD_IMAGE_TAG=latest          # or a release tag such as 1.2.0
+ICECOLD_HTTP_BIND=127.0.0.1       # host address for the HTTP port; keep loopback behind a reverse proxy
 ICECOLD_HTTP_PORT=8080
+ICECOLD_UID=1654                  # host identity that can read ICECOLD_CONTENT_ROOT
+ICECOLD_GID=1654
+ICECOLD_ALLOWED_HOSTS=icecold.example.org
+ICECOLD_LOG_FORMAT=simple         # or json
+ICECOLD_AUTO_MIGRATE=true
+
+# Reverse proxy trust (enabled by default; trusts the Compose network gateway)
+ICECOLD_REVERSE_PROXY_ENABLED=true
+ICECOLD_NETWORK_SUBNET=172.31.250.0/24
+
+# Optional separate public origin for /webseed (for example a non-CDN hostname)
+ICECOLD_WEBSEED_PUBLIC_BASE_URL=
+
+# Peer-wire seeding
+ICECOLD_PEERWIRE_ENABLED=false
+ICECOLD_PEERWIRE_ADVERTISED_IP=   # public IP address, required when peer-wire is enabled
 ICECOLD_PEERWIRE_PORT=6881
-ICECOLD_IMAGE_TAG=latest
-ICECOLD_UID=1000
-ICECOLD_GID=1000
 ```
 
-`POSTGRES_PASSWORD`, `ICECOLD_ADMIN_API_KEY`, `ICECOLD_PUBLIC_BASE_URL`, and `ICECOLD_CONTENT_ROOT` are required. Set `ICECOLD_UID`/`ICECOLD_GID` if the container needs a specific host identity to read the content root.
+`POSTGRES_PASSWORD`, `ICECOLD_ADMIN_API_KEY`, `ICECOLD_PUBLIC_BASE_URL`, and `ICECOLD_CONTENT_ROOT` are required. The container runs as UID/GID 1654 (the .NET image's `app` user) unless `ICECOLD_UID`/`ICECOLD_GID` are set; pick an identity that can read the content root.
 
 ### Start
 
@@ -86,12 +101,40 @@ ICECOLD_GID=1000
 docker compose -f compose.prod.yaml up -d
 ```
 
+### Reverse Proxy
+
+The HTTP port is published on `127.0.0.1` by default. Terminate TLS in a reverse proxy on the host and forward to it. Compose pins the network to `ICECOLD_NETWORK_SUBNET`, and Icecold trusts `X-Forwarded-For`/`X-Forwarded-Proto` only from that subnet, which is where host-side proxies appear from. If that subnet clashes with another Docker network on the host, change it.
+
+The proxy must set `X-Forwarded-For` to the real client address. If it sits behind a CDN, restore the client IP first (for example nginx `real_ip_header CF-Connecting-IP`) and then send `X-Forwarded-For $remote_addr`, not `$proxy_add_x_forwarded_for`. Otherwise the tracker records every peer under the proxy's address.
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+location /webseed/ {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;
+    proxy_read_timeout 300s;
+}
+```
+
+If Icecold receives traffic directly with no proxy, set `ICECOLD_REVERSE_PROXY_ENABLED=false` and `ICECOLD_HTTP_BIND=0.0.0.0`.
+
 ### Notes
 
 - `ICECOLD_CONTENT_ROOT` is mounted read-only at `/data/files` inside the container.
 - Set `ICECOLD_AUTO_MIGRATE=false` to manage database migrations separately.
-- `compose.prod.yaml` maps deployment essentials. Use a Compose override for app-level settings such as peer-wire, webseed, super-seeding, standby mode, indexing concurrency, and tracker limits.
-- For internet-facing deployments, put Icecold behind a reverse proxy that terminates TLS. If peer-wire is enabled, it uses plain TCP on `ICECOLD_PEERWIRE_PORT` and must be reachable directly by BitTorrent clients.
+- Run a single Icecold instance per database. The tracker peer store is in memory, and on startup Icecold resets every in-progress indexing job to `Pending`, which would take over jobs owned by another live instance.
+- `compose.prod.yaml` maps deployment essentials. Use a Compose override for other app-level settings such as super-seeding, standby mode, indexing concurrency, and tracker limits.
+- Peer-wire uses plain TCP on `ICECOLD_PEERWIRE_PORT` and must be reachable directly by BitTorrent clients, not through an HTTP proxy or CDN. Open it in any host or cloud firewall.
+- The PostgreSQL service uses the `postgres:18` image, which stores data under `/var/lib/postgresql/18/docker` in the volume. Upgrading an existing volume from an older major version needs `pg_upgrade` or a dump and restore.
+- Container logs are rotated by the Docker `json-file` driver (5 × 20 MB per service).
 
 ## API
 
