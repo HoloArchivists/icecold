@@ -24,7 +24,7 @@ public sealed class WebSeedController(WebSeedService webSeed, IOptions<IcecoldOp
         if (!InfoHashUtil.IsHexInfoHash(infoHash))
             return BadRequest(new ProblemDetailsDto(InvalidInfoHashMessage));
 
-        var result = await webSeed.OpenAsync(infoHash, Request.Headers[HeaderNames.Range].ToString(), cancellationToken);
+        var result = await webSeed.OpenAsync(infoHash, fileName, Request.Headers[HeaderNames.Range].ToString(), cancellationToken);
 
         if (result.Status == WebSeedOpenStatus.NotFound)
             return NotFound();

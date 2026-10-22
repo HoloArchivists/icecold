@@ -6,10 +6,13 @@ public sealed class TorrentRecord
 
     public string SourceName { get; set; } = "";
 
+    // For multi-file torrents SourcePath and ContentVersion hold a manifest hash of the file list
+    // (see MultiFileManifest), so the content-identity index also deduplicates those requests.
     public string SourcePath { get; set; } = "";
 
     public string DisplayName { get; set; } = "";
 
+    // Sum of the backing file lengths; excludes multi-file padding.
     public long ContentLength { get; set; }
 
     public string? ContentVersion { get; set; }
@@ -55,5 +58,10 @@ public sealed class TorrentRecord
 
     public DateTimeOffset? CompletedAt { get; set; }
 
+    // Multi-file torrents are served from Files, all read from SourceName, and have no locations.
+    public bool IsMultiFile { get; set; }
+
     public List<TorrentLocationRecord> Locations { get; set; } = [];
+
+    public List<TorrentFileRecord> Files { get; set; } = [];
 }

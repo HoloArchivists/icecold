@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Globalization;
 using System.Security.Cryptography;
 using Icecold.Api.Content;
 
@@ -21,20 +22,84 @@ public sealed class TorrentBuilder(PublicUrlBuilder urls)
 
         var torrentName = string.IsNullOrWhiteSpace(displayName) ? metadata.DisplayName : displayName;
         var pieceLength = SelectPieceLength(metadata.Length);
-        var pieces = await HashPiecesAsync(source, metadata, pieceLength, onProgress, cancellationToken);
-        var pieceCount = pieces.Length / SHA1.HashSizeInBytes;
+        using var hashes = new MemoryStream();
+        await HashPiecesAsync(source, metadata, pieceLength, hashes, padFinalPiece: false, 0, onProgress, cancellationToken);
 
         var info = new Dictionary<string, object>(StringComparer.Ordinal)
         {
             ["length"] = metadata.Length,
             ["name"] = torrentName,
             ["piece length"] = pieceLength,
-            ["pieces"] = pieces
+            ["pieces"] = hashes.ToArray()
         };
 
+        return Build(info, torrentName, pieceLength, multiFile: false);
+    }
+
+    // Files are laid out in the given order, each but the last followed by a BEP 47 pad file up to
+    // the next piece boundary (see TorrentContentLayout).
+    public async Task<TorrentBuildResult> BuildMultiFileAsync(
+        string name,
+        IReadOnlyList<MultiFileTorrentEntry> files,
+        IContentSource source,
+        CancellationToken cancellationToken,
+        Action<long>? onProgress = null)
+    {
+        if (files.Count == 0)
+            throw new ContentSourceException("A multi-file torrent needs at least one file.");
+
+        foreach (var file in files)
+        {
+            if (file.Metadata.Length <= 0)
+                throw new ContentSourceException($"Zero-length file '{file.Metadata.Path}' cannot be indexed.");
+        }
+
+        var pieceLength = SelectPieceLength(files.Sum(f => f.Metadata.Length));
+        using var hashes = new MemoryStream();
+        var fileList = new List<object>(files.Count * 2);
+        long hashedBytes = 0;
+        for (var i = 0; i < files.Count; i++)
+        {
+            var file = files[i];
+            var isLast = i == files.Count - 1;
+            await HashPiecesAsync(source, file.Metadata, pieceLength, hashes, padFinalPiece: !isLast, hashedBytes, onProgress, cancellationToken);
+            hashedBytes += file.Metadata.Length;
+
+            fileList.Add(new Dictionary<string, object>(StringComparer.Ordinal)
+            {
+                ["length"] = file.Metadata.Length,
+                ["path"] = file.TorrentPath.Split('/').Cast<object>().ToList()
+            });
+
+            var padding = TorrentContentLayout.PaddingAfter(file.Metadata.Length, pieceLength);
+            if (!isLast && padding > 0)
+            {
+                fileList.Add(new Dictionary<string, object>(StringComparer.Ordinal)
+                {
+                    ["attr"] = "p",
+                    ["length"] = padding,
+                    ["path"] = new List<object> { ".pad", padding.ToString(CultureInfo.InvariantCulture) }
+                });
+            }
+        }
+
+        var info = new Dictionary<string, object>(StringComparer.Ordinal)
+        {
+            ["files"] = fileList,
+            ["name"] = name,
+            ["piece length"] = pieceLength,
+            ["pieces"] = hashes.ToArray()
+        };
+
+        return Build(info, name, pieceLength, multiFile: true);
+    }
+
+    TorrentBuildResult Build(Dictionary<string, object> info, string torrentName, int pieceLength, bool multiFile)
+    {
+        var pieceCount = ((byte[])info["pieces"]).Length / SHA1.HashSizeInBytes;
         var infoBytes = Bencode.Encode(info);
         var infoHash = InfoHashUtil.Sha1Hex(infoBytes);
-        var webSeedUrl = urls.WebSeedEnabled ? urls.BuildWebSeedUrl(infoHash, torrentName) : null;
+        var webSeedUrl = urls.WebSeedEnabled ? urls.BuildWebSeedUrl(infoHash, torrentName, multiFile) : null;
 
         var torrent = new Dictionary<string, object>(StringComparer.Ordinal)
         {
@@ -74,17 +139,21 @@ public sealed class TorrentBuilder(PublicUrlBuilder urls)
         return 16 * 1024 * 1024;
     }
 
-    static async Task<byte[]> HashPiecesAsync(
+    // Appends the SHA-1 of each piece of one file to hashes. With padFinalPiece, a short final
+    // piece is zero-filled to pieceLength, matching the pad file that follows it.
+    static async Task HashPiecesAsync(
         IContentSource source,
         ContentMetadata metadata,
         int pieceLength,
+        Stream hashes,
+        bool padFinalPiece,
+        long progressBase,
         Action<long>? onProgress,
         CancellationToken cancellationToken)
     {
         var path = metadata.Path;
         var expectedLength = metadata.Length;
         await using var content = await source.OpenReadAsync(path, cancellationToken);
-        using var hashes = new MemoryStream();
         var buffer = ArrayPool<byte>.Shared.Rent(pieceLength);
 
         try
@@ -106,9 +175,15 @@ public sealed class TorrentBuilder(PublicUrlBuilder urls)
                 if (pieceBytes == 0)
                     break;
 
+                if (padFinalPiece && pieceBytes < pieceLength)
+                {
+                    buffer.AsSpan(pieceBytes, pieceLength - pieceBytes).Clear();
+                    pieceBytes = pieceLength;
+                }
+
                 var hash = SHA1.HashData(buffer.AsSpan(0, pieceBytes));
                 hashes.Write(hash);
-                onProgress?.Invoke(totalRead);
+                onProgress?.Invoke(progressBase + totalRead);
             }
 
             if (totalRead != expectedLength)
@@ -119,8 +194,6 @@ public sealed class TorrentBuilder(PublicUrlBuilder urls)
             var versionAfterHashing = source.GetOpenStreamVersion(content);
             if (versionAfterHashing is not null && versionAfterHashing != metadata.Version)
                 throw new ContentSourceException($"Content changed while hashing '{path}'.");
-
-            return hashes.ToArray();
         }
         finally
         {
@@ -128,6 +201,9 @@ public sealed class TorrentBuilder(PublicUrlBuilder urls)
         }
     }
 }
+
+// TorrentPath is slash-separated and relative to the torrent name.
+public sealed record MultiFileTorrentEntry(ContentMetadata Metadata, string TorrentPath);
 
 public sealed record TorrentBuildResult(
     byte[] TorrentBytes,

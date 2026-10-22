@@ -21,6 +21,7 @@ public sealed class AdminTorrentsController(
     {
         var torrent = await db.Torrents.AsNoTracking()
             .Include(t => t.Locations)
+            .Include(t => t.Files)
             .FirstOrDefaultAsync(t => t.Id == id, cancellationToken);
 
         return torrent is null
@@ -34,6 +35,7 @@ public sealed class AdminTorrentsController(
     {
         var torrent = await db.Torrents
             .Include(t => t.Locations)
+            .Include(t => t.Files)
             .FirstOrDefaultAsync(t => t.Id == id, cancellationToken);
         if (torrent is null)
             return NotFound();

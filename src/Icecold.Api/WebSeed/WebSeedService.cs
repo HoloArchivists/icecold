@@ -6,8 +6,11 @@ namespace Icecold.Api.WebSeed;
 
 public sealed class WebSeedService(TorrentLocationService locations)
 {
+    // fileName is the request path after the infohash. Single-file torrents ignore it; for
+    // multi-file torrents (BEP 19) it is the torrent name followed by the file's path.
     public async Task<WebSeedOpenResult> OpenAsync(
         string infoHash,
+        string? fileName,
         string? rangeHeader,
         CancellationToken cancellationToken)
     {
@@ -26,17 +29,23 @@ public sealed class WebSeedService(TorrentLocationService locations)
                 return WebSeedOpenResult.NotFound();
             }
 
-            var range = ParseRange(rangeHeader, resolved.Metadata.Length);
+            var file = resolved.Layout.IsMultiFile
+                ? FindMultiFileEntry(resolved, fileName)
+                : resolved.Layout.Files[0];
+            if (file is null)
+                return WebSeedOpenResult.NotFound();
+
+            var range = ParseRange(rangeHeader, file.Length);
             if (!range.Satisfiable)
-                return WebSeedOpenResult.RangeNotSatisfiable(resolved.Metadata.Length);
+                return WebSeedOpenResult.RangeNotSatisfiable(file.Length);
 
             try
             {
                 var stream = range.Partial
-                    ? await resolved.Source.OpenRangeAsync(resolved.Metadata.Path, range.Offset, range.Length, cancellationToken)
-                    : await resolved.Source.OpenReadAsync(resolved.Metadata.Path, cancellationToken);
+                    ? await resolved.Source.OpenRangeAsync(file.SourcePath, range.Offset, range.Length, cancellationToken)
+                    : await resolved.Source.OpenReadAsync(file.SourcePath, cancellationToken);
 
-                return WebSeedOpenResult.Opened(stream, range.Offset, range.Length, resolved.Metadata.Length, range.Partial);
+                return WebSeedOpenResult.Opened(stream, range.Offset, range.Length, file.Length, range.Partial);
             }
             catch (Exception ex) when (IsContentAccessFailure(ex))
             {
@@ -44,6 +53,16 @@ public sealed class WebSeedService(TorrentLocationService locations)
                 await locations.ReportLocationFailureAsync(resolved.Location.Id, ex, cancellationToken);
             }
         }
+    }
+
+    static TorrentContentFile? FindMultiFileEntry(TorrentServingLocation resolved, string? fileName)
+    {
+        var prefix = resolved.Torrent.DisplayName + "/";
+        if (fileName is null || !fileName.StartsWith(prefix, StringComparison.Ordinal))
+            return null;
+
+        var torrentPath = fileName[prefix.Length..];
+        return resolved.Layout.Files.FirstOrDefault(f => string.Equals(f.TorrentPath, torrentPath, StringComparison.Ordinal));
     }
 
     // Per RFC 9110 a server may ignore Range; invalid, non-bytes, and multi-range headers get the full 200 body.

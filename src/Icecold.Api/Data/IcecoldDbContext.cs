@@ -9,6 +9,8 @@ public sealed class IcecoldDbContext(DbContextOptions<IcecoldDbContext> options)
 
     public DbSet<TorrentLocationRecord> TorrentLocations => Set<TorrentLocationRecord>();
 
+    public DbSet<TorrentFileRecord> TorrentFiles => Set<TorrentFileRecord>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         var torrent = modelBuilder.Entity<TorrentRecord>();
@@ -73,6 +75,18 @@ public sealed class IcecoldDbContext(DbContextOptions<IcecoldDbContext> options)
         location.HasOne(l => l.Torrent)
             .WithMany(t => t.Locations)
             .HasForeignKey(l => l.TorrentId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        var file = modelBuilder.Entity<TorrentFileRecord>();
+        file.ToTable("torrent_files");
+        file.HasKey(f => f.Id);
+        file.Property(f => f.SourcePath).HasMaxLength(4096).IsRequired();
+        file.Property(f => f.TorrentPath).HasMaxLength(4096).IsRequired();
+        file.Property(f => f.ContentVersion).HasMaxLength(512);
+        file.HasIndex(f => new { f.TorrentId, f.Index }).IsUnique();
+        file.HasOne<TorrentRecord>()
+            .WithMany(t => t.Files)
+            .HasForeignKey(f => f.TorrentId)
             .OnDelete(DeleteBehavior.Cascade);
     }
 

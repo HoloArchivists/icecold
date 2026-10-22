@@ -576,16 +576,28 @@ public sealed class PeerWireConnectionHandler(
         Memory<byte> buffer,
         CancellationToken cancellationToken)
     {
-        var seekable = await state.GetSeekableContentAsync(torrent, cancellationToken);
-        if (seekable is not null)
+        var written = 0;
+        foreach (var segment in torrent.Layout.Segments(request.Offset, request.Length))
         {
-            seekable.Seek(request.Offset, SeekOrigin.Begin);
-            await ReadContentExactlyAsync(seekable, buffer, torrent.SourcePath, cancellationToken);
-            return;
-        }
+            var target = buffer.Slice(written, checked((int)segment.Length));
+            written += target.Length;
+            if (segment.File is not { } file)
+            {
+                target.Span.Clear();
+                continue;
+            }
 
-        await using var content = await torrent.Source.OpenRangeAsync(torrent.SourcePath, request.Offset, request.Length, cancellationToken);
-        await ReadContentExactlyAsync(content, buffer, torrent.SourcePath, cancellationToken);
+            var seekable = await state.GetSeekableContentAsync(torrent, file, cancellationToken);
+            if (seekable is not null)
+            {
+                seekable.Seek(segment.FileOffset, SeekOrigin.Begin);
+                await ReadContentExactlyAsync(seekable, target, file.SourcePath, cancellationToken);
+                continue;
+            }
+
+            await using var content = await torrent.Source.OpenRangeAsync(file.SourcePath, segment.FileOffset, segment.Length, cancellationToken);
+            await ReadContentExactlyAsync(content, target, file.SourcePath, cancellationToken);
+        }
     }
 
     static int GetPieceLength(PeerWireTorrentContext torrent, int pieceIndex)
@@ -683,6 +695,7 @@ sealed class PeerWireSessionState : IAsyncDisposable
 {
     byte[]? blockBuffer;
     Stream? seekableContent;
+    int seekableFileIndex;
 
     public byte? RemoteMetadataExtensionId { get; set; }
 
@@ -701,15 +714,25 @@ sealed class PeerWireSessionState : IAsyncDisposable
         return blockBuffer;
     }
 
-    public async Task<Stream?> GetSeekableContentAsync(PeerWireTorrentContext torrent, CancellationToken cancellationToken)
+    // Keeps the most recently read file open; peers usually request a run of blocks from one file.
+    public async Task<Stream?> GetSeekableContentAsync(
+        PeerWireTorrentContext torrent,
+        TorrentContentFile file,
+        CancellationToken cancellationToken)
     {
-        if (seekableContent is not null)
+        if (seekableContent is not null && seekableFileIndex == file.Index)
             return seekableContent;
 
         if (torrent.Source is not ISeekableContentSource seekableSource)
             return null;
 
-        var opened = await seekableSource.OpenSeekableReadAsync(torrent.SourcePath, cancellationToken);
+        if (seekableContent is not null)
+        {
+            await seekableContent.DisposeAsync();
+            seekableContent = null;
+        }
+
+        var opened = await seekableSource.OpenSeekableReadAsync(file.SourcePath, cancellationToken);
         if (!opened.CanSeek)
         {
             await opened.DisposeAsync();
@@ -717,6 +740,7 @@ sealed class PeerWireSessionState : IAsyncDisposable
         }
 
         seekableContent = opened;
+        seekableFileIndex = file.Index;
         return seekableContent;
     }
 

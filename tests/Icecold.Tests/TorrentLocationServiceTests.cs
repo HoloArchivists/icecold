@@ -51,7 +51,7 @@ public sealed class TorrentLocationServiceTests : IDisposable
         await using var provider = CreateProvider(db);
         var webSeed = new WebSeedService(CreateLocationService(provider));
 
-        var result = await webSeed.OpenAsync(torrentResult.InfoHashHex, null, CancellationToken.None);
+        var result = await webSeed.OpenAsync(torrentResult.InfoHashHex, null, null, CancellationToken.None);
 
         Assert.Equal(WebSeedOpenStatus.Opened, result.Status);
         await using var stream = result.Stream!;
@@ -109,7 +109,7 @@ public sealed class TorrentLocationServiceTests : IDisposable
         await using var provider = CreateProvider(db);
         var webSeed = new WebSeedService(CreateLocationService(provider));
 
-        var result = await webSeed.OpenAsync(torrentResult.InfoHashHex, null, CancellationToken.None);
+        var result = await webSeed.OpenAsync(torrentResult.InfoHashHex, null, null, CancellationToken.None);
 
         Assert.Equal(WebSeedOpenStatus.Unavailable, result.Status);
     }
@@ -127,7 +127,7 @@ public sealed class TorrentLocationServiceTests : IDisposable
         await using var provider = CreateProvider(db);
         var webSeed = new WebSeedService(CreateLocationService(provider));
 
-        var result = await webSeed.OpenAsync(torrentResult.InfoHashHex, null, CancellationToken.None);
+        var result = await webSeed.OpenAsync(torrentResult.InfoHashHex, null, null, CancellationToken.None);
 
         Assert.Equal(WebSeedOpenStatus.Unavailable, result.Status);
         Assert.Equal(TorrentLocationStatus.Missing, (await db.TorrentLocations.SingleAsync()).Status);
@@ -145,7 +145,7 @@ public sealed class TorrentLocationServiceTests : IDisposable
         await using var provider = CreateProvider(db);
         var webSeed = new WebSeedService(CreateLocationService(provider));
 
-        var result = await webSeed.OpenAsync(torrentResult.InfoHashHex, "bytes=99-100", CancellationToken.None);
+        var result = await webSeed.OpenAsync(torrentResult.InfoHashHex, null, "bytes=99-100", CancellationToken.None);
 
         Assert.Equal(WebSeedOpenStatus.RangeNotSatisfiable, result.Status);
         Assert.Equal(5, result.ContentLength);
