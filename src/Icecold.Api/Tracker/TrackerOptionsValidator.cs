@@ -19,11 +19,21 @@ public sealed class TrackerOptionsValidator : IValidateOptions<IcecoldOptions>
         if (tracker.PeerTimeoutSeconds < 1)
             failures.Add("Icecold:Tracker:PeerTimeoutSeconds must be at least 1.");
 
+        if (tracker.MinAnnounceIntervalSeconds > tracker.AnnounceIntervalSeconds)
+            failures.Add("Icecold:Tracker:MinAnnounceIntervalSeconds must not exceed AnnounceIntervalSeconds.");
+
+        // Peers that reannounce on schedule must not time out between announces.
+        if (tracker.PeerTimeoutSeconds <= tracker.AnnounceIntervalSeconds)
+            failures.Add("Icecold:Tracker:PeerTimeoutSeconds must be greater than AnnounceIntervalSeconds.");
+
         if (tracker.MaxPeersReturned < 0)
             failures.Add("Icecold:Tracker:MaxPeersReturned must be at least 0.");
 
         if (tracker.MaxPeersStoredPerTorrent < 1)
             failures.Add("Icecold:Tracker:MaxPeersStoredPerTorrent must be at least 1.");
+
+        if (tracker.MaxPeersPerSourceIpPerTorrent < 1)
+            failures.Add("Icecold:Tracker:MaxPeersPerSourceIpPerTorrent must be at least 1.");
 
         if (tracker.PruneIntervalSeconds < 1)
             failures.Add("Icecold:Tracker:PruneIntervalSeconds must be at least 1.");

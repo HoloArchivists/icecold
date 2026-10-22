@@ -111,11 +111,11 @@ public sealed class TorrentLocationServiceTests : IDisposable
 
         var result = await webSeed.OpenAsync(torrentResult.InfoHashHex, null, CancellationToken.None);
 
-        Assert.Equal(WebSeedOpenStatus.Conflict, result.Status);
+        Assert.Equal(WebSeedOpenStatus.Unavailable, result.Status);
     }
 
     [Fact]
-    public async Task WebSeed_Returns_Conflict_When_Known_Torrent_Has_No_Readable_Location()
+    public async Task WebSeed_Returns_Unavailable_When_Known_Torrent_Has_No_Readable_Location()
     {
         await File.WriteAllTextAsync(Path.Combine(hotRoot, "payload.bin"), "missing soon");
 
@@ -129,7 +129,7 @@ public sealed class TorrentLocationServiceTests : IDisposable
 
         var result = await webSeed.OpenAsync(torrentResult.InfoHashHex, null, CancellationToken.None);
 
-        Assert.Equal(WebSeedOpenStatus.Conflict, result.Status);
+        Assert.Equal(WebSeedOpenStatus.Unavailable, result.Status);
         Assert.Equal(TorrentLocationStatus.Missing, (await db.TorrentLocations.SingleAsync()).Status);
     }
 
@@ -184,6 +184,113 @@ public sealed class TorrentLocationServiceTests : IDisposable
         Assert.Equal("bytes", context.Response.Headers[HeaderNames.AcceptRanges].ToString());
         Assert.Equal("bytes */5", context.Response.Headers[HeaderNames.ContentRange].ToString());
         Assert.Equal(0, context.Response.ContentLength);
+    }
+
+    [Theory]
+    [InlineData("bytes=abc")]
+    [InlineData("items=0-1")]
+    [InlineData("bytes=0-0,2-3")]
+    [InlineData("bytes=3-1")]
+    public async Task WebSeed_Controller_Ignores_Invalid_Or_Multi_Range_And_Serves_Full_Body(string rangeHeader)
+    {
+        var (controller, context, infoHash) = await CreateWebSeedControllerAsync("hello");
+        context.Request.Headers[HeaderNames.Range] = rangeHeader;
+
+        var result = await controller.Get(infoHash, "payload.bin", CancellationToken.None);
+
+        Assert.IsType<EmptyResult>(result);
+        Assert.Equal(StatusCodes.Status200OK, context.Response.StatusCode);
+        Assert.Equal(5, context.Response.ContentLength);
+        Assert.Equal("hello", Encoding.ASCII.GetString(((MemoryStream)context.Response.Body).ToArray()));
+    }
+
+    [Fact]
+    public async Task WebSeed_Controller_Sends_Caching_Headers_On_Full_And_Partial_Responses()
+    {
+        var (controller, context, infoHash) = await CreateWebSeedControllerAsync("hello");
+
+        _ = await controller.Get(infoHash, "payload.bin", CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status200OK, context.Response.StatusCode);
+        Assert.Equal("bytes", context.Response.Headers[HeaderNames.AcceptRanges].ToString());
+        Assert.Equal("public, max-age=86400", context.Response.Headers[HeaderNames.CacheControl].ToString());
+        Assert.Equal($"\"{infoHash}\"", context.Response.Headers[HeaderNames.ETag].ToString());
+
+        var partialContext = CreateWebSeedHttpContext();
+        partialContext.Request.Headers[HeaderNames.Range] = "bytes=1-2";
+        controller.ControllerContext = new ControllerContext { HttpContext = partialContext };
+
+        _ = await controller.Get(infoHash, "payload.bin", CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status206PartialContent, partialContext.Response.StatusCode);
+        Assert.Equal("bytes 1-2/5", partialContext.Response.Headers[HeaderNames.ContentRange].ToString());
+        Assert.Equal("public, max-age=86400", partialContext.Response.Headers[HeaderNames.CacheControl].ToString());
+        Assert.Equal($"\"{infoHash}\"", partialContext.Response.Headers[HeaderNames.ETag].ToString());
+        Assert.Equal("el", Encoding.ASCII.GetString(((MemoryStream)partialContext.Response.Body).ToArray()));
+    }
+
+    [Fact]
+    public async Task WebSeed_Controller_Answers_Head_Without_Body()
+    {
+        var (controller, context, infoHash) = await CreateWebSeedControllerAsync("hello");
+        context.Request.Method = HttpMethods.Head;
+
+        var result = await controller.Get(infoHash, "payload.bin", CancellationToken.None);
+
+        Assert.IsType<EmptyResult>(result);
+        Assert.Equal(StatusCodes.Status200OK, context.Response.StatusCode);
+        Assert.Equal(5, context.Response.ContentLength);
+        Assert.Equal($"\"{infoHash}\"", context.Response.Headers[HeaderNames.ETag].ToString());
+        Assert.Empty(((MemoryStream)context.Response.Body).ToArray());
+    }
+
+    [Fact]
+    public async Task WebSeed_Controller_Returns_503_With_Retry_After_When_No_Location_Is_Readable()
+    {
+        var (controller, context, infoHash) = await CreateWebSeedControllerAsync("missing soon");
+        File.Delete(Path.Combine(hotRoot, "payload.bin"));
+
+        var result = await controller.Get(infoHash, "payload.bin", CancellationToken.None);
+
+        var problem = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, problem.StatusCode);
+        Assert.Equal("60", context.Response.Headers[HeaderNames.RetryAfter].ToString());
+        Assert.True(string.IsNullOrEmpty(context.Response.Headers[HeaderNames.ETag].ToString()));
+    }
+
+    async Task<(WebSeedController Controller, DefaultHttpContext Context, string InfoHash)> CreateWebSeedControllerAsync(string content)
+    {
+        await File.WriteAllTextAsync(Path.Combine(hotRoot, "payload.bin"), content);
+
+        var hotSource = new LocalFileContentSource("hot", hotRoot);
+        var hotMetadata = await hotSource.GetMetadataAsync("payload.bin", CancellationToken.None);
+        var torrentResult = await CreateBuilder().BuildSingleFileAsync(hotMetadata, hotSource, null, CancellationToken.None);
+        // In-memory db and provider are left to the GC so the controller can outlive this helper.
+        var db = CreateDb(torrentResult, hotMetadata);
+        var provider = CreateProvider(db);
+        var context = CreateWebSeedHttpContext();
+        var controller = new WebSeedController(
+            new WebSeedService(CreateLocationService(provider)),
+            Options.Create(new IcecoldOptions
+            {
+                WebSeed = new WebSeedOptions { Enabled = true }
+            }))
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = context
+            }
+        };
+
+        return (controller, context, torrentResult.InfoHashHex);
+    }
+
+    static DefaultHttpContext CreateWebSeedHttpContext()
+    {
+        var context = new DefaultHttpContext();
+        context.Request.Method = HttpMethods.Get;
+        context.Response.Body = new MemoryStream();
+        return context;
     }
 
     IcecoldDbContext CreateDb(TorrentBuildResult torrentResult, ContentMetadata metadata)

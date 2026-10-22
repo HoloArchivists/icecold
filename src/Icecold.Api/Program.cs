@@ -26,8 +26,10 @@ builder.Services.AddSwaggerGen(options =>
 builder.Services.AddOptions<IcecoldOptions>()
     .Bind(builder.Configuration.GetSection(IcecoldOptions.SectionName))
     .ValidateOnStart();
+builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, AdminApiKeyOptionsValidator>();
 builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, IndexingOptionsValidator>();
 builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, PeerWireOptionsValidator>();
+builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, PublicUrlOptionsValidator>();
 builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, ReverseProxyOptionsValidator>();
 builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, ServingOptionsValidator>();
 builder.Services.AddSingleton<IValidateOptions<IcecoldOptions>, StatsOptionsValidator>();

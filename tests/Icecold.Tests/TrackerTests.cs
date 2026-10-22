@@ -217,14 +217,189 @@ public sealed class TrackerTests
         var firstPeer = Enumerable.Repeat((byte)1, 20).ToArray();
         var secondPeer = Enumerable.Repeat((byte)2, 20).ToArray();
 
-        _ = store.Announce(CreateAnnounce(infoHash, firstPeer, "127.0.0.1", 6881, left: 0));
+        var first = store.Announce(CreateAnnounce(infoHash, firstPeer, "127.0.0.1", 6881, left: 0));
         var result = store.Announce(CreateAnnounce(infoHash, secondPeer, "127.0.0.1", 6882, left: 0));
 
+        Assert.Equal(TimeSpan.FromSeconds(1800), first.Interval);
         var peer = Assert.Single(result.Peers);
         Assert.Equal(firstPeer, peer.PeerId);
         Assert.Equal(1, result.Complete);
         Assert.Equal(0, result.Incomplete);
+        Assert.Equal(TimeSpan.FromSeconds(300), result.Interval);
+        Assert.Equal(TimeSpan.FromSeconds(300), result.MinInterval);
         Assert.Equal(1, store.Scrape(infoHash).Complete);
+    }
+
+    [Fact]
+    public void Announce_RateLimits_Per_Source_And_InfoHash()
+    {
+        var store = CreateStore(new IcecoldOptions
+        {
+            Tracker = new TrackerOptions
+            {
+                MaxAnnouncesPerSourceIpPerMinute = 1
+            }
+        });
+        var firstHash = new string('a', 40);
+        var secondHash = new string('b', 40);
+        var peerId = Enumerable.Repeat((byte)1, 20).ToArray();
+
+        _ = store.Announce(CreateAnnounce(firstHash, peerId, "198.51.100.1", 6881));
+        var other = store.Announce(CreateAnnounce(secondHash, peerId, "198.51.100.1", 6881));
+
+        Assert.Equal(TimeSpan.FromSeconds(1800), other.Interval);
+        Assert.Equal(1, store.Scrape(firstHash).Incomplete);
+        Assert.Equal(1, store.Scrape(secondHash).Incomplete);
+    }
+
+    [Fact]
+    public void Announce_RateLimits_Ipv6_Sources_By_Slash64()
+    {
+        var store = CreateStore(new IcecoldOptions
+        {
+            Tracker = new TrackerOptions
+            {
+                MaxAnnouncesPerSourceIpPerMinute = 1
+            }
+        });
+        var infoHash = new string('a', 40);
+
+        _ = store.Announce(CreateAnnounce(infoHash, Enumerable.Repeat((byte)1, 20).ToArray(), "2001:db8:1:1::1", 6881));
+        var samePrefix = store.Announce(CreateAnnounce(infoHash, Enumerable.Repeat((byte)2, 20).ToArray(), "2001:db8:1:1::2", 6882));
+        var otherPrefix = store.Announce(CreateAnnounce(infoHash, Enumerable.Repeat((byte)3, 20).ToArray(), "2001:db8:1:2::1", 6883));
+
+        Assert.Equal(TimeSpan.FromSeconds(300), samePrefix.Interval);
+        Assert.Equal(TimeSpan.FromSeconds(1800), otherPrefix.Interval);
+        Assert.Equal(2, store.Scrape(infoHash).Incomplete);
+    }
+
+    [Fact]
+    public void Announce_Caps_Peers_Per_Source_And_Evicts_That_Sources_Oldest_Entry()
+    {
+        var store = CreateStore(new IcecoldOptions
+        {
+            Tracker = new TrackerOptions
+            {
+                MaxPeersPerSourceIpPerTorrent = 2,
+                MaxPeersStoredPerTorrent = 4,
+                MaxPeersReturned = 50,
+                MaxAnnouncesPerSourceIpPerMinute = 0
+            }
+        });
+        var infoHash = new string('a', 40);
+        var honestPeer = Enumerable.Repeat((byte)200, 20).ToArray();
+
+        _ = store.Announce(CreateAnnounce(infoHash, honestPeer, "198.51.100.200", 6881));
+        for (byte i = 1; i <= 10; i++)
+        {
+            Thread.Sleep(2);
+            _ = store.Announce(CreateAnnounce(infoHash, Enumerable.Repeat(i, 20).ToArray(), "203.0.113.1", 7000 + i));
+        }
+
+        var result = store.Announce(CreateAnnounce(infoHash, Enumerable.Repeat((byte)100, 20).ToArray(), "192.0.2.1", 6900));
+
+        Assert.Contains(result.Peers, p => p.PeerId.SequenceEqual(honestPeer));
+        Assert.Contains(result.Peers, p => p.PeerId.SequenceEqual(Enumerable.Repeat((byte)10, 20)));
+        Assert.DoesNotContain(result.Peers, p => p.PeerId.SequenceEqual(Enumerable.Repeat((byte)8, 20)));
+        Assert.Equal(4, store.Scrape(infoHash).Incomplete);
+        Assert.Equal(4, store.GetStats().Peers);
+    }
+
+    [Fact]
+    public void Announce_Caps_Ipv6_Peers_Per_Slash64()
+    {
+        var store = CreateStore(new IcecoldOptions
+        {
+            Tracker = new TrackerOptions
+            {
+                MaxPeersPerSourceIpPerTorrent = 1,
+                MaxAnnouncesPerSourceIpPerMinute = 0
+            }
+        });
+        var infoHash = new string('a', 40);
+
+        _ = store.Announce(CreateAnnounce(infoHash, Enumerable.Repeat((byte)1, 20).ToArray(), "2001:db8:1:1::1", 6881));
+        _ = store.Announce(CreateAnnounce(infoHash, Enumerable.Repeat((byte)2, 20).ToArray(), "2001:db8:1:1::2", 6882));
+        _ = store.Announce(CreateAnnounce(infoHash, Enumerable.Repeat((byte)3, 20).ToArray(), "2001:db8:1:2::1", 6883));
+
+        Assert.Equal(2, store.Scrape(infoHash).Incomplete);
+    }
+
+    [Fact]
+    public void Announce_Reannounce_Does_Not_Count_Against_Per_Source_Cap()
+    {
+        var store = CreateStore(new IcecoldOptions
+        {
+            Tracker = new TrackerOptions
+            {
+                MaxPeersPerSourceIpPerTorrent = 2,
+                MaxAnnouncesPerSourceIpPerMinute = 0
+            }
+        });
+        var infoHash = new string('a', 40);
+        var first = Enumerable.Repeat((byte)1, 20).ToArray();
+        var second = Enumerable.Repeat((byte)2, 20).ToArray();
+
+        _ = store.Announce(CreateAnnounce(infoHash, first, "203.0.113.1", 6881));
+        _ = store.Announce(CreateAnnounce(infoHash, second, "203.0.113.1", 6882));
+        for (var i = 0; i < 5; i++)
+            _ = store.Announce(CreateAnnounce(infoHash, first, "203.0.113.1", 6881));
+
+        Assert.Equal(2, store.Scrape(infoHash).Incomplete);
+    }
+
+    [Fact]
+    public async Task Announce_Is_Consistent_Under_Concurrent_Load()
+    {
+        var store = CreateStore(new IcecoldOptions
+        {
+            Tracker = new TrackerOptions
+            {
+                MaxAnnouncesPerSourceIpPerMinute = 0
+            }
+        });
+        var infoHashes = Enumerable.Range(0, 4).Select(i => new string((char)('a' + i), 40)).ToArray();
+
+        await Parallel.ForAsync(0, 400, (i, cancellationToken) =>
+        {
+            var infoHash = infoHashes[i % infoHashes.Length];
+            var peerId = BitConverter.GetBytes(i).Concat(new byte[16]).ToArray();
+            _ = store.Announce(CreateAnnounce(infoHash, peerId, $"10.0.{i / 250}.{i % 250}", 6881, left: i % 2));
+            _ = store.Scrape(infoHash);
+            _ = store.GetSwarmStats(infoHash);
+            if (i % 50 == 0)
+                _ = store.GetStats();
+            return ValueTask.CompletedTask;
+        });
+
+        var stats = store.GetStats();
+        Assert.Equal(4, stats.ActiveInfoHashes);
+        Assert.Equal(400, stats.Peers);
+        Assert.Equal(200, stats.Seeders);
+        Assert.Equal(200, stats.Leechers);
+    }
+
+    [Fact]
+    public void Announce_Stopped_Removes_Peer_And_Empty_Bucket()
+    {
+        var store = CreateStore(new IcecoldOptions
+        {
+            Tracker = new TrackerOptions
+            {
+                MaxAnnouncesPerSourceIpPerMinute = 0
+            }
+        });
+        var infoHash = new string('a', 40);
+        var peerId = Enumerable.Repeat((byte)1, 20).ToArray();
+
+        _ = store.Announce(CreateAnnounce(infoHash, peerId, "198.51.100.1", 6881));
+        _ = store.Announce(CreateAnnounce(infoHash, peerId, "198.51.100.1", 6881) with { Event = "stopped" });
+
+        Assert.Equal(0, store.Scrape(infoHash).Incomplete);
+        Assert.Equal(0, store.GetStats().ActiveInfoHashes);
+
+        _ = store.Announce(CreateAnnounce(infoHash, peerId, "198.51.100.1", 6881));
+        Assert.Equal(1, store.Scrape(infoHash).Incomplete);
     }
 
     [Fact]
@@ -726,6 +901,27 @@ public sealed class TrackerTests
         Assert.Contains("Icecold:Tracker:AdditionalAnnounceUrls entries must be absolute http, https, or udp tracker URLs.", result.Failures);
         Assert.Contains("Icecold:Tracker:TrustedIpParameterSources entries must not be blank.", result.Failures);
         Assert.Contains("Icecold:Tracker:TrustedIpParameterSources entries must be IP addresses or CIDR ranges.", result.Failures);
+    }
+
+    [Fact]
+    public void TrackerOptionsValidator_Rejects_Inconsistent_Intervals_And_Source_Cap()
+    {
+        var result = new TrackerOptionsValidator().Validate(null, new IcecoldOptions
+        {
+            Tracker = new TrackerOptions
+            {
+                AnnounceIntervalSeconds = 600,
+                MinAnnounceIntervalSeconds = 900,
+                PeerTimeoutSeconds = 600,
+                MaxPeersPerSourceIpPerTorrent = 0
+            }
+        });
+
+        Assert.True(result.Failed);
+        Assert.Contains("Icecold:Tracker:MinAnnounceIntervalSeconds must not exceed AnnounceIntervalSeconds.", result.Failures);
+        Assert.Contains("Icecold:Tracker:PeerTimeoutSeconds must be greater than AnnounceIntervalSeconds.", result.Failures);
+        Assert.Contains("Icecold:Tracker:MaxPeersPerSourceIpPerTorrent must be at least 1.", result.Failures);
+        Assert.False(new TrackerOptionsValidator().Validate(null, new IcecoldOptions()).Failed);
     }
 
     static string PercentEncode(IEnumerable<byte> bytes)
